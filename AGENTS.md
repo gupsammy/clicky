@@ -14,7 +14,7 @@ All API keys live on a Cloudflare Worker proxy — nothing sensitive ships in th
 - **App Type**: Menu bar-only (`LSUIElement=true`), no dock icon or main window
 - **Framework**: SwiftUI (macOS native) with AppKit bridging for menu bar panel and cursor overlay
 - **Pattern**: MVVM with `@StateObject` / `@Published` state management
-- **AI Chat**: Claude (Sonnet 4.6 default, Opus 4.6 optional) via Cloudflare Worker proxy with SSE streaming
+- **AI Chat**: Claude (Sonnet 4.6 default, Opus 4.6 optional) via Cloudflare Worker proxy with SSE streaming. This fork routes `/chat` through Google Vertex AI (`us-east5`) using a GCP service account, rather than the upstream Anthropic direct path.
 - **Speech-to-Text**: AssemblyAI real-time streaming (`u3-rt-pro` model) via websocket, with OpenAI and Apple Speech as fallbacks
 - **Text-to-Speech**: ElevenLabs (`eleven_flash_v2_5` model) via Cloudflare Worker proxy
 - **Screen Capture**: ScreenCaptureKit (macOS 14.2+), multi-monitor support
@@ -29,12 +29,12 @@ The app never calls external APIs directly. All requests go through a Cloudflare
 
 | Route | Upstream | Purpose |
 |-------|----------|---------|
-| `POST /chat` | `api.anthropic.com/v1/messages` | Claude vision + streaming chat |
+| `POST /chat` | `{region}-aiplatform.googleapis.com` (Vertex AI) | Claude vision + streaming chat via `streamRawPredict`. Worker signs a service-account JWT, exchanges it for an OAuth access token (cached in module scope), and forwards the SSE stream unchanged. |
 | `POST /tts` | `api.elevenlabs.io/v1/text-to-speech/{voiceId}` | ElevenLabs TTS audio |
-| `POST /transcribe-token` | `streaming.assemblyai.com/v3/token` | Fetches a short-lived (480s) AssemblyAI websocket token |
+| `POST /transcribe-token` | `streaming.assemblyai.com/v3/token` | Fetches a short-lived (480s) AssemblyAI websocket token. Unused when `VoiceTranscriptionProvider=apple` in Info.plist. |
 
-Worker secrets: `ANTHROPIC_API_KEY`, `ASSEMBLYAI_API_KEY`, `ELEVENLABS_API_KEY`
-Worker vars: `ELEVENLABS_VOICE_ID`
+Worker secrets: `GCP_SERVICE_ACCOUNT_KEY` (full JSON key for the Vertex proxy service account), `ELEVENLABS_API_KEY`, `ASSEMBLYAI_API_KEY` (optional — only needed if the app uses AssemblyAI transcription).
+Worker vars: `ELEVENLABS_VOICE_ID`, `VERTEX_PROJECT_ID`, `VERTEX_REGION`
 
 ### Key Architecture Decisions
 

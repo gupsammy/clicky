@@ -12,6 +12,7 @@ import Combine
 import Foundation
 import PostHog
 import ScreenCaptureKit
+import Speech
 import SwiftUI
 
 enum CompanionVoiceState {
@@ -29,6 +30,7 @@ final class CompanionManager: ObservableObject {
     @Published private(set) var hasAccessibilityPermission = false
     @Published private(set) var hasScreenRecordingPermission = false
     @Published private(set) var hasMicrophonePermission = false
+    @Published private(set) var hasSpeechRecognitionPermission = false
     @Published private(set) var hasScreenContentPermission = false
 
     /// Screen location (global AppKit coords) of a detected UI element the
@@ -70,7 +72,7 @@ final class CompanionManager: ObservableObject {
 
     /// Base URL for the Cloudflare Worker proxy. All API requests route
     /// through this so keys never ship in the app binary.
-    private static let workerBaseURL = "https://your-worker-name.your-subdomain.workers.dev"
+    private static let workerBaseURL = "https://clicky-proxy.sg-claude-git.workers.dev"
 
     private lazy var claudeAPI: ClaudeAPI = {
         return ClaudeAPI(proxyURL: "\(Self.workerBaseURL)/chat", model: selectedModel)
@@ -100,7 +102,14 @@ final class CompanionManager: ObservableObject {
     /// True when all three required permissions (accessibility, screen recording,
     /// microphone) are granted. Used by the panel to show a single "all good" state.
     var allPermissionsGranted: Bool {
-        hasAccessibilityPermission && hasScreenRecordingPermission && hasMicrophonePermission && hasScreenContentPermission
+        let hasRequiredSpeechRecognitionPermission = !buddyDictationManager.transcriptionProviderRequiresSpeechRecognitionPermission
+            || hasSpeechRecognitionPermission
+
+        return hasAccessibilityPermission
+            && hasScreenRecordingPermission
+            && hasMicrophonePermission
+            && hasRequiredSpeechRecognitionPermission
+            && hasScreenContentPermission
     }
 
     /// Whether the blue cursor overlay is currently visible on screen.
@@ -306,6 +315,7 @@ final class CompanionManager: ObservableObject {
         let previouslyHadAccessibility = hasAccessibilityPermission
         let previouslyHadScreenRecording = hasScreenRecordingPermission
         let previouslyHadMicrophone = hasMicrophonePermission
+        let previouslyHadSpeechRecognition = hasSpeechRecognitionPermission
         let previouslyHadAll = allPermissionsGranted
 
         let currentlyHasAccessibility = WindowPositionManager.hasAccessibilityPermission()
@@ -322,11 +332,18 @@ final class CompanionManager: ObservableObject {
         let micAuthStatus = AVCaptureDevice.authorizationStatus(for: .audio)
         hasMicrophonePermission = micAuthStatus == .authorized
 
+        if buddyDictationManager.transcriptionProviderRequiresSpeechRecognitionPermission {
+            hasSpeechRecognitionPermission = SFSpeechRecognizer.authorizationStatus() == .authorized
+        } else {
+            hasSpeechRecognitionPermission = true
+        }
+
         // Debug: log permission state on changes
         if previouslyHadAccessibility != hasAccessibilityPermission
             || previouslyHadScreenRecording != hasScreenRecordingPermission
-            || previouslyHadMicrophone != hasMicrophonePermission {
-            print("🔑 Permissions — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), screenContent: \(hasScreenContentPermission)")
+            || previouslyHadMicrophone != hasMicrophonePermission
+            || previouslyHadSpeechRecognition != hasSpeechRecognitionPermission {
+            print("🔑 Permissions — accessibility: \(hasAccessibilityPermission), screen: \(hasScreenRecordingPermission), mic: \(hasMicrophonePermission), speech: \(hasSpeechRecognitionPermission), screenContent: \(hasScreenContentPermission)")
         }
 
         // Track individual permission grants as they happen
@@ -338,6 +355,9 @@ final class CompanionManager: ObservableObject {
         }
         if !previouslyHadMicrophone && hasMicrophonePermission {
             ClickyAnalytics.trackPermissionGranted(permission: "microphone")
+        }
+        if !previouslyHadSpeechRecognition && hasSpeechRecognitionPermission {
+            ClickyAnalytics.trackPermissionGranted(permission: "speech_recognition")
         }
         // Screen content permission is persisted — once the user has approved the
         // SCShareableContent picker, we don't need to re-check it.

@@ -236,6 +236,10 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     @Published var lastErrorMessage: String?
     @Published private(set) var currentPermissionProblem: BuddyDictationPermissionProblem?
 
+    var transcriptionProviderRequiresSpeechRecognitionPermission: Bool {
+        transcriptionProvider.requiresSpeechRecognitionPermission
+    }
+
     var isDictationInProgress: Bool {
         isPreparingToRecord || isRecordingFromMicrophoneButton || isRecordingFromKeyboardShortcut || isFinalizingTranscript
     }

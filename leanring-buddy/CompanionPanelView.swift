@@ -8,6 +8,7 @@
 //
 
 import AVFoundation
+import Speech
 import SwiftUI
 
 struct CompanionPanelView: View {
@@ -153,7 +154,7 @@ struct CompanionPanelView: View {
                     .font(.system(size: 12, weight: .bold))
                     .foregroundColor(DS.Colors.textSecondary)
 
-                Text("Some permissions were revoked. Grant all four below to keep using Clicky.")
+                Text("Some permissions were revoked. Grant every permission below to keep using Clicky.")
                     .font(.system(size: 11))
                     .foregroundColor(DS.Colors.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -251,6 +252,10 @@ struct CompanionPanelView: View {
                 .padding(.bottom, 6)
 
             microphonePermissionRow
+
+            if companionManager.buddyDictationManager.transcriptionProviderRequiresSpeechRecognitionPermission {
+                speechRecognitionPermissionRow
+            }
 
             accessibilityPermissionRow
 
@@ -472,6 +477,57 @@ struct CompanionPanelView: View {
                         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
                             NSWorkspace.shared.open(url)
                         }
+                    }
+                }) {
+                    Text("Grant")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(DS.Colors.textOnAccent)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(
+                            Capsule()
+                                .fill(DS.Colors.accent)
+                        )
+                }
+                .buttonStyle(.plain)
+                .pointerCursor()
+            }
+        }
+        .padding(.vertical, 6)
+    }
+
+    private var speechRecognitionPermissionRow: some View {
+        let isGranted = companionManager.hasSpeechRecognitionPermission
+        return HStack {
+            HStack(spacing: 8) {
+                Image(systemName: "waveform.badge.magnifyingglass")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(isGranted ? DS.Colors.textTertiary : DS.Colors.warning)
+                    .frame(width: 16)
+
+                Text("Speech Recognition")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(DS.Colors.textSecondary)
+            }
+
+            Spacer()
+
+            if isGranted {
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(DS.Colors.success)
+                        .frame(width: 6, height: 6)
+                    Text("Granted")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(DS.Colors.success)
+                }
+            } else {
+                Button(action: {
+                    let speechRecognitionAuthorizationStatus = SFSpeechRecognizer.authorizationStatus()
+                    if speechRecognitionAuthorizationStatus == .notDetermined {
+                        SFSpeechRecognizer.requestAuthorization { _ in }
+                    } else if let speechRecognitionSettingsURL = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition") {
+                        NSWorkspace.shared.open(speechRecognitionSettingsURL)
                     }
                 }) {
                     Text("Grant")
