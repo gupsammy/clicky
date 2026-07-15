@@ -68,6 +68,7 @@ final class CompanionManager: ObservableObject {
     let globalPushToTalkShortcutMonitor = GlobalPushToTalkShortcutMonitor()
     let overlayWindowManager = OverlayWindowManager()
     private let focusedTextInsertionService = FocusedTextInsertionService()
+    private let openAIScreenCompositionClient = OpenAIScreenCompositionClient()
     // Response text is now displayed inline on the cursor overlay via
     // streamingResponseText, so no separate response overlay manager is needed.
 
@@ -99,6 +100,8 @@ final class CompanionManager: ObservableObject {
     private var activeFastDictationFocusContext: DictationFocusContext?
     private var activeFastDictationInsertionTask: Task<Void, Never>?
     private var fastDictationStartedAt: Date?
+    private var activeScreenAwareDictationFocusContext: DictationFocusContext?
+    private var screenAwareDictationStartedAt: Date?
     /// Scheduled hide for transient cursor mode — cancelled if the user
     /// speaks again before the delay elapses.
     private var transientHideTask: Task<Void, Never>?
@@ -515,8 +518,17 @@ final class CompanionManager: ObservableObject {
             guard !buddyDictationManager.isDictationInProgress else { return }
             activeFastDictationFocusContext = nil
             fastDictationStartedAt = nil
+            activeScreenAwareDictationFocusContext = nil
+            screenAwareDictationStartedAt = nil
             // Don't register push-to-talk while the onboarding video is playing
             guard !showOnboardingVideo else { return }
+
+            if openAIScreenCompositionClient.isConfigured,
+               let focusContext = try? focusedTextInsertionService.captureFocusContext(),
+               (try? focusedTextInsertionService.screenAwareContext(for: focusContext)) != nil {
+                activeScreenAwareDictationFocusContext = focusContext
+                screenAwareDictationStartedAt = Date()
+            }
 
             // Cancel any pending transient hide so the overlay stays visible
             transientHideTask?.cancel()
@@ -549,7 +561,11 @@ final class CompanionManager: ObservableObject {
             }
     
 
-            ClickyAnalytics.trackPushToTalkStarted()
+            if activeScreenAwareDictationFocusContext != nil {
+                ClickyAnalytics.trackScreenAwareDictationStarted()
+            } else {
+                ClickyAnalytics.trackPushToTalkStarted()
+            }
 
             pendingKeyboardShortcutStartTask?.cancel()
             pendingKeyboardShortcutStartTask = Task {
@@ -559,10 +575,25 @@ final class CompanionManager: ObservableObject {
                         // Partial transcripts are hidden (waveform-only UI)
                     },
                     submitDraftText: { [weak self] finalTranscript in
-                        self?.lastTranscript = finalTranscript
-                        print("🗣️ Companion received transcript: \(finalTranscript)")
-                        ClickyAnalytics.trackUserMessageSent(transcript: finalTranscript)
-                        self?.sendTranscriptToClaudeWithScreenshot(transcript: finalTranscript)
+                        guard let self else { return }
+                        self.lastTranscript = finalTranscript
+                        print("🗣️ Companion received final transcript (\(finalTranscript.count) characters)")
+                        if let focusContext = self.activeScreenAwareDictationFocusContext {
+                            self.composeAndInsertScreenAwareText(
+                                spokenInstruction: finalTranscript,
+                                focusContext: focusContext,
+                                startedAt: self.screenAwareDictationStartedAt
+                            )
+                        } else {
+                            ClickyAnalytics.trackUserMessageSent(transcript: finalTranscript)
+                            self.sendTranscriptToClaudeWithScreenshot(transcript: finalTranscript)
+                        }
+                        self.activeScreenAwareDictationFocusContext = nil
+                        self.screenAwareDictationStartedAt = nil
+                    },
+                    dictationSessionFinished: { [weak self] in
+                        self?.activeScreenAwareDictationFocusContext = nil
+                        self?.screenAwareDictationStartedAt = nil
                     }
                 )
             }
@@ -571,7 +602,11 @@ final class CompanionManager: ObservableObject {
             // before the async startPushToTalk had a chance to begin recording.
             // Without this, a quick press-and-release drops the release event and
             // leaves the waveform overlay stuck on screen indefinitely.
-            ClickyAnalytics.trackPushToTalkReleased()
+            if activeScreenAwareDictationFocusContext != nil {
+                ClickyAnalytics.trackScreenAwareDictationReleased()
+            } else {
+                ClickyAnalytics.trackPushToTalkReleased()
+            }
             pendingKeyboardShortcutStartTask?.cancel()
             pendingKeyboardShortcutStartTask = nil
             buddyDictationManager.stopPushToTalkFromKeyboardShortcut()
@@ -681,6 +716,76 @@ final class CompanionManager: ObservableObject {
         buddyDictationManager.reportExternalFailure(errorMessage)
         NSSound.beep()
         ClickyAnalytics.trackFastDictationFailed()
+    }
+
+    private func composeAndInsertScreenAwareText(
+        spokenInstruction: String,
+        focusContext: DictationFocusContext,
+        startedAt: Date?
+    ) {
+        currentResponseTask?.cancel()
+        elevenLabsTTSClient.stopPlayback()
+
+        currentResponseTask = Task {
+            voiceState = .processing
+
+            do {
+                let focusedTextContext = try focusedTextInsertionService
+                    .screenAwareContext(for: focusContext)
+                guard let focusedElementFrame = focusedTextContext
+                    .focusedElementFrameInCoreGraphicsCoordinates else {
+                    throw FocusedTextInsertionError(
+                        message: "This text field does not expose its screen location, so Clicky did not capture a display."
+                    )
+                }
+                let selectedScreenCapture = try await CompanionScreenCaptureUtility
+                    .captureFocusedDisplayAsJPEG(
+                        focusedElementFrameInCoreGraphicsCoordinates: focusedElementFrame
+                    )
+                guard !Task.isCancelled else { return }
+
+                let compositionRequest = try ScreenAwareCompositionRequest(
+                    spokenInstruction: spokenInstruction,
+                    applicationName: focusedTextContext.applicationName,
+                    windowTitle: focusedTextContext.windowTitle,
+                    selectedText: focusedTextContext.selectedText,
+                    textBeforeSelection: focusedTextContext.textBeforeSelection,
+                    textAfterSelection: focusedTextContext.textAfterSelection,
+                    screenshotJPEGData: selectedScreenCapture.imageData
+                )
+                let compositionResponse = try await openAIScreenCompositionClient.compose(
+                    request: compositionRequest
+                )
+                guard !Task.isCancelled else { return }
+
+                let insertionMethod = try await focusedTextInsertionService
+                    .insertScreenAwareComposition(
+                        compositionText: compositionResponse.text,
+                        into: focusContext,
+                        matching: focusedTextContext
+                    )
+                ClickyAnalytics.trackScreenAwareDictationCompleted(
+                    characterCount: compositionResponse.text.count,
+                    insertionMethod: insertionMethod,
+                    latencyMilliseconds: fastDictationLatencyMilliseconds(since: startedAt)
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                reportScreenAwareDictationFailure(error.localizedDescription)
+            }
+
+            if !Task.isCancelled {
+                voiceState = .idle
+                scheduleTransientHideIfNeeded()
+            }
+        }
+    }
+
+    private func reportScreenAwareDictationFailure(_ errorMessage: String) {
+        buddyDictationManager.lastErrorMessage = errorMessage
+        NSSound.beep()
+        ClickyAnalytics.trackScreenAwareDictationFailed()
     }
 
     // MARK: - Companion Prompt

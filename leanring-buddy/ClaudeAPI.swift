@@ -36,11 +36,12 @@ class ClaudeAPI {
         warmUpTLSConnectionIfNeeded()
     }
 
-    private func makeAPIRequest() -> URLRequest {
+    private func makeAPIRequest() throws -> URLRequest {
         var request = URLRequest(url: apiURL)
         request.httpMethod = "POST"
         request.timeoutInterval = 120
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        try ClickyProxyAuthorization.authorize(&request)
         return request
     }
 
@@ -107,7 +108,7 @@ class ClaudeAPI {
     ) async throws -> (text: String, duration: TimeInterval) {
         let startTime = Date()
 
-        var request = makeAPIRequest()
+        var request = try makeAPIRequest()
 
         // Build messages array
         var messages: [[String: Any]] = []
@@ -220,7 +221,7 @@ class ClaudeAPI {
     ) async throws -> (text: String, duration: TimeInterval) {
         let startTime = Date()
 
-        var request = makeAPIRequest()
+        var request = try makeAPIRequest()
 
         var messages: [[String: Any]] = []
         for (userPlaceholder, assistantResponse) in conversationHistory {
