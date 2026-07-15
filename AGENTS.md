@@ -5,7 +5,7 @@
 
 ## Overview
 
-macOS menu bar companion app. Lives entirely in the macOS status bar (no dock icon, no main window). Clicking the menu bar icon opens a custom floating panel with companion voice controls. Uses push-to-talk (ctrl+option) to capture voice input, transcribes it via AssemblyAI streaming, and sends the transcript + a screenshot of the user's screen to Claude. Claude responds with text (streamed via SSE) and voice (ElevenLabs TTS). A blue cursor overlay can fly to and point at UI elements Claude references on any connected monitor.
+macOS menu bar companion app. Lives entirely in the macOS status bar (no dock icon, no main window). Clicking the menu bar icon opens a custom floating panel with companion voice controls. Uses push-to-talk (ctrl+option) to capture voice input, transcribes it through OpenAI Realtime when configured, and sends the transcript + a screenshot of the user's screen to Claude. Claude responds with text (streamed via SSE) and voice (ElevenLabs TTS). A blue cursor overlay can fly to and point at UI elements Claude references on any connected monitor.
 
 All API keys live on a Cloudflare Worker proxy — nothing sensitive ships in the app.
 
@@ -15,7 +15,7 @@ All API keys live on a Cloudflare Worker proxy — nothing sensitive ships in th
 - **Framework**: SwiftUI (macOS native) with AppKit bridging for menu bar panel and cursor overlay
 - **Pattern**: MVVM with `@StateObject` / `@Published` state management
 - **AI Chat**: Claude (Sonnet 4.6 default, Opus 4.6 optional) via Cloudflare Worker proxy with SSE streaming. This fork routes `/chat` through Google Vertex AI (`us-east5`) using a GCP service account, rather than the upstream Anthropic direct path.
-- **Speech-to-Text**: AssemblyAI real-time streaming (`u3-rt-pro` model) via websocket, with OpenAI and Apple Speech as fallbacks
+- **Speech-to-Text**: OpenAI Realtime streaming (`gpt-realtime-whisper`) via websocket and a Worker-minted ephemeral client secret. Apple Speech is the no-API fallback; AssemblyAI remains available as an explicitly selected legacy provider.
 - **Text-to-Speech**: ElevenLabs (`eleven_flash_v2_5` model) via Cloudflare Worker proxy
 - **Screen Capture**: ScreenCaptureKit (macOS 14.2+), multi-monitor support
 - **Voice Input**: Push-to-talk via `AVAudioEngine` + pluggable transcription-provider layer. System-wide keyboard shortcut via listen-only CGEvent tap.
@@ -33,8 +33,9 @@ The app never calls external APIs directly. All requests go through a Cloudflare
 | `POST /chat` | `{region}-aiplatform.googleapis.com` (Vertex AI) | Claude vision + streaming chat via `streamRawPredict`. Worker signs a service-account JWT, exchanges it for an OAuth access token (cached in module scope), and forwards the SSE stream unchanged. |
 | `POST /tts` | `api.elevenlabs.io/v1/text-to-speech/{voiceId}` | ElevenLabs TTS audio |
 | `POST /transcribe-token` | `streaming.assemblyai.com/v3/token` | Fetches a short-lived (480s) AssemblyAI websocket token. Unused when `VoiceTranscriptionProvider=apple` in Info.plist. |
+| `POST /openai-realtime-token` | `api.openai.com/v1/realtime/client_secrets` | Fetches a short-lived OpenAI transcription-session client secret. |
 
-Worker secrets: `GCP_SERVICE_ACCOUNT_KEY` (full JSON key for the Vertex proxy service account), `ELEVENLABS_API_KEY`, `ASSEMBLYAI_API_KEY` (optional — only needed if the app uses AssemblyAI transcription).
+Worker secrets: `GCP_SERVICE_ACCOUNT_KEY` (full JSON key for the Vertex proxy service account), `ELEVENLABS_API_KEY`, `OPENAI_API_KEY`, `ASSEMBLYAI_API_KEY` (optional — only needed if the app uses AssemblyAI transcription).
 Worker vars: `ELEVENLABS_VOICE_ID`, `VERTEX_PROJECT_ID`, `VERTEX_REGION`
 
 ### Key Architecture Decisions
@@ -46,6 +47,8 @@ Worker vars: `ELEVENLABS_VOICE_ID`, `VERTEX_PROJECT_ID`, `VERTEX_REGION`
 **Global Push-To-Talk Shortcut**: Background push-to-talk uses a listen-only `CGEvent` tap instead of an AppKit global monitor so modifier-based shortcuts like `ctrl + option` are detected more reliably while the app is running in the background.
 
 **Shared URLSession for AssemblyAI**: A single long-lived `URLSession` is shared across all AssemblyAI streaming sessions (owned by the provider, not the session). Creating and invalidating a URLSession per session corrupts the OS connection pool and causes "Socket is not connected" errors after a few rapid reconnections.
+
+**OpenAI Realtime Dictation**: The app never stores a standard OpenAI API key. It asks the Worker for a one-minute client secret, opens one authenticated websocket per push-to-talk session, converts microphone audio to 24 kHz mono PCM16, streams base64 audio append events, and manually commits the buffer on key-up. The provider reconciles delta and completed events by `item_id`. GA `gpt-realtime-whisper` does not accept prompt steering, so contextual vocabulary stays at the dictation-manager seam for a later screen-aware cleanup pass.
 
 **Transient Cursor Mode**: When "Show Clicky" is off, pressing the hotkey fades in the cursor overlay for the duration of the interaction (recording → response → TTS → optional pointing), then fades it out automatically after 1 second of inactivity.
 
@@ -69,7 +72,8 @@ Worker vars: `ELEVENLABS_VOICE_ID`, `VERTEX_PROJECT_ID`, `VERTEX_REGION`
 | `BuddyDictationManager.swift` | ~866 | Push-to-talk voice pipeline. Handles microphone capture via `AVAudioEngine`, provider-aware permission checks, keyboard/button dictation sessions, transcript finalization, shortcut parsing, contextual keyterms, and live audio-level reporting for waveform feedback. |
 | `BuddyTranscriptionProvider.swift` | ~100 | Protocol surface and provider factory for voice transcription backends. Resolves provider based on `VoiceTranscriptionProvider` in Info.plist — AssemblyAI, OpenAI, or Apple Speech. |
 | `AssemblyAIStreamingTranscriptionProvider.swift` | ~478 | Streaming transcription provider. Fetches temp tokens from the Cloudflare Worker, opens an AssemblyAI v3 websocket, streams PCM16 audio, tracks turn-based transcripts, and delivers finalized text on key-up. Shares a single URLSession across all sessions. |
-| `OpenAIAudioTranscriptionProvider.swift` | ~317 | Upload-based transcription provider. Buffers push-to-talk audio locally, uploads as WAV on release, returns finalized transcript. |
+| `OpenAIRealtimeTranscriptionProvider.swift` | ~418 | OpenAI-first streaming provider. Fetches an ephemeral client secret from the Worker, streams 24 kHz PCM16 to Realtime, commits on key-up, and delivers partial/final transcripts without embedding an API key. |
+| `DictationCore/OpenAIRealtimeTranscriptionProtocol.swift` | ~188 | UI-independent session/client event encoding, server event parsing, and item-aware transcript accumulation for OpenAI Realtime. |
 | `AppleSpeechTranscriptionProvider.swift` | ~147 | Local fallback transcription provider backed by Apple's Speech framework. |
 | `BuddyAudioConversionSupport.swift` | ~108 | Audio conversion helpers. Converts live mic buffers to PCM16 mono audio and builds WAV payloads for upload-based providers. |
 | `GlobalPushToTalkShortcutMonitor.swift` | ~132 | System-wide push-to-talk monitor. Owns the listen-only `CGEvent` tap and publishes press/release transitions. |
@@ -88,12 +92,13 @@ Worker vars: `ELEVENLABS_VOICE_ID`, `VERTEX_PROJECT_ID`, `VERTEX_REGION`
 | `AgentCore/CodexAgentClient.swift` | ~153 | Safe app-server thread and turn operations: start, resume, list, read, start turn, steer, and interrupt. |
 | `AgentCore/CodexAgentTaskModels.swift` | ~120 | HUD-independent task, activity, approval, and event models for concurrent agent progress. |
 | `AgentCore/CodexAgentTaskStore.swift` | ~582 | Actor reducer and stream monitor that converts Codex notifications and approval requests into bounded, concurrent task snapshots. |
-| `Package.swift` | ~27 | UI-independent Swift package harness for compiling and testing `AgentCore` without invoking Xcode or touching TCC permissions. |
+| `Package.swift` | ~42 | UI-independent Swift package harness for compiling and testing agent and dictation protocol cores without invoking Xcode or touching TCC permissions. |
 | `AgentCoreTests/CodexAppServerCoreTests.swift` | ~320 | Deterministic transport/protocol tests plus an opt-in live handshake against an installed, authenticated Codex app-server. |
 | `AgentCoreTests/CodexAgentThreadTests.swift` | ~510 | Wire-level safety tests for workspace scoping and durable thread/turn operations plus an opt-in ephemeral live thread test. |
 | `AgentCoreTests/CodexAgentTaskStoreTests.swift` | ~525 | Reducer tests for concurrency, deltas, activities, approvals, terminal states, multi-turn reset, ordering, and memory bounds. |
-| `.github/workflows/agent-core-tests.yml` | ~19 | Runs the UI-independent AgentCore suite with warnings treated as errors on macOS pull requests and main pushes. |
-| `worker/src/index.ts` | ~142 | Cloudflare Worker proxy. Three routes: `/chat` (Claude), `/tts` (ElevenLabs), `/transcribe-token` (AssemblyAI temp token). |
+| `DictationCoreTests/OpenAIRealtimeTranscriptionProtocolTests.swift` | ~69 | Deterministic tests for Realtime session configuration, audio encoding, event parsing, and transcript reconciliation. |
+| `.github/workflows/agent-core-tests.yml` | ~19 | Runs the UI-independent agent and dictation suites with warnings treated as errors on macOS pull requests and main pushes. |
+| `worker/src/index.ts` | ~224 | Cloudflare Worker proxy for Claude chat, ElevenLabs TTS, AssemblyAI tokens, and ephemeral OpenAI Realtime transcription secrets. |
 
 ## Build & Run
 
@@ -103,7 +108,7 @@ open leanring-buddy.xcodeproj
 
 # Select the leanring-buddy scheme, set signing team, Cmd+R to build and run
 
-# Compile and run the UI-independent Codex app-server tests
+# Compile and run the UI-independent agent and dictation protocol tests
 swift test
 
 # Opt into the local ChatGPT-subscription handshake test
@@ -127,6 +132,7 @@ npm install
 npx wrangler secret put ANTHROPIC_API_KEY
 npx wrangler secret put ASSEMBLYAI_API_KEY
 npx wrangler secret put ELEVENLABS_API_KEY
+npx wrangler secret put OPENAI_API_KEY
 
 # Deploy
 npx wrangler deploy

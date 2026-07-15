@@ -8,6 +8,7 @@
  *   POST /chat              → Vertex AI Claude (streaming)
  *   POST /tts               → ElevenLabs TTS API
  *   POST /transcribe-token  → AssemblyAI temp token (legacy, unused with Apple Speech)
+ *   POST /openai-realtime-token → short-lived OpenAI Realtime client secret
  */
 
 interface Env {
@@ -17,6 +18,7 @@ interface Env {
   ELEVENLABS_API_KEY: string;
   ELEVENLABS_VOICE_ID: string;
   ASSEMBLYAI_API_KEY: string;
+  OPENAI_API_KEY: string;
 }
 
 interface ServiceAccountKey {
@@ -49,6 +51,10 @@ export default {
 
       if (url.pathname === "/transcribe-token") {
         return await handleTranscribeToken(env);
+      }
+
+      if (url.pathname === "/openai-realtime-token") {
+        return await handleOpenAIRealtimeToken(env);
       }
     } catch (error) {
       console.error(`[${url.pathname}] Unhandled error:`, error);
@@ -264,6 +270,93 @@ async function handleTranscribeToken(env: Env): Promise<Response> {
     status: 200,
     headers: { "content-type": "application/json" },
   });
+}
+
+async function handleOpenAIRealtimeToken(env: Env): Promise<Response> {
+  const response = await fetch(
+    "https://api.openai.com/v1/realtime/client_secrets",
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${env.OPENAI_API_KEY}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        session: {
+          type: "transcription",
+          audio: {
+            input: {
+              format: {
+                type: "audio/pcm",
+                rate: 24000,
+              },
+              transcription: {
+                model: "gpt-realtime-whisper",
+                language: "en",
+                delay: "low",
+              },
+              turn_detection: null,
+            },
+          },
+        },
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    console.error(`[/openai-realtime-token] OpenAI API error ${response.status}`);
+    return new Response(errorBody, {
+      status: response.status,
+      headers: {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+      },
+    });
+  }
+
+  const session = await response.json<{
+    value?: string;
+    expires_at?: number;
+    client_secret?: string | { value?: string; expires_at?: number };
+  }>();
+  const nestedClientSecret =
+    typeof session.client_secret === "object"
+      ? session.client_secret
+      : undefined;
+  const token =
+    session.value ??
+    (typeof session.client_secret === "string"
+      ? session.client_secret
+      : nestedClientSecret?.value);
+  const expiresAt = session.expires_at ?? nestedClientSecret?.expires_at;
+
+  if (!token) {
+    return new Response(
+      JSON.stringify({ error: "OpenAI did not return a client secret." }),
+      {
+        status: 502,
+        headers: {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+        },
+      }
+    );
+  }
+
+  return new Response(
+    JSON.stringify({
+      token,
+      expiresAt,
+    }),
+    {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+      },
+    }
+  );
 }
 
 async function handleTTS(request: Request, env: Env): Promise<Response> {

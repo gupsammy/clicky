@@ -355,17 +355,21 @@ Approach A is recommended.
 
 ## PR and turn plan
 
-The estimate is 16-22 autonomous goal turns across seven reviewable PRs. A turn is one meaningful implementation/verification/review-follow-up cycle, not every shell command. Review latency and unexpected TCC/runtime behavior can increase the total.
+The refined estimate is 20-28 autonomous goal turns across nine reviewable PRs. A turn is one meaningful implementation/verification/review-follow-up cycle, not every shell command. The original seven-PR outline was split after the app-server investigation exposed two independently valuable seams: safe thread control before presentation state, and Realtime transport before focused-field insertion. Review latency and unexpected TCC/runtime behavior can increase the total.
 
 ```text
-PR 1  Baseline safety, branch reconciliation, privacy, test seam       1-2 turns
-PR 2  Codex runtime + JSON-RPC client + generated-schema fixtures     2-3 turns
-PR 3  Agent sessions, thread persistence, turn reducer, approvals     3-4 turns
-PR 4  Agent HUD/history/attachments/artifacts/follow-up UX            3-4 turns
-PR 5  Fast dictation, focus capture, insertion, latency instrumentation 2-3 turns
-PR 6  Screen-aware dictation + user/model annotation grammar          2-3 turns
-PR 7  Realtime voice router + local memory/skills                     3-4 turns
+PR 1  Baseline safety, privacy, parity document, test seam             1-2 turns
+PR 2  Codex runtime + JSONL app-server client                          2-3 turns
+PR 3  Safe durable agent threads and turn controls                     2-3 turns
+PR 4  Concurrent task/event/approval reducer                           2-3 turns
+PR 5  OpenAI Realtime dictation transport + ephemeral secrets         2-3 turns
+PR 6  Fast shortcut, focus capture, insertion, latency instrumentation 2-3 turns
+PR 7  Screen-aware dictation + user/model annotation grammar          2-3 turns
+PR 8  Agent HUD/history/attachments/artifacts/notch UX                 3-4 turns
+PR 9  Realtime voice router + local memory/skills                      3-4 turns
 ```
+
+As of July 15, 2026, PRs 1-4 are open as green drafts and PR 5 is in implementation. They establish the clean-room research baseline, subscription-backed Codex process protocol, safe workspace-scoped durable threads, and HUD-independent concurrent task state. No PR has been merged.
 
 Each PR should be developed in an isolated worktree, verified independently, opened as draft, and watched for both review comments and CI. Actionable feedback should be pulled, fixed, and re-verified until checks are green. Nothing should be merged without explicit user instruction.
 
@@ -416,3 +420,4 @@ OpenAI architecture sources:
 - [GPT-Realtime models](https://developers.openai.com/api/docs/models/all)
 - [GPT-4o Transcribe](https://developers.openai.com/api/docs/models/gpt-4o-transcribe)
 - [GPT-Realtime-Whisper](https://developers.openai.com/api/docs/models/gpt-realtime-whisper)
+- [Realtime transcription guide](https://developers.openai.com/api/docs/guides/realtime-transcription)
