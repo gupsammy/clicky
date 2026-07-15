@@ -220,7 +220,7 @@ actor CodexAppServerClient {
         connectionState = .disconnected
     }
 
-    private func sendRequest<Parameters: Encodable, Response: Decodable>(
+    func sendRequest<Parameters: Encodable, Response: Decodable>(
         method: String,
         parameters: Parameters
     ) async throws -> Response {

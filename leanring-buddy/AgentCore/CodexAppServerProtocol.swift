@@ -229,6 +229,8 @@ enum CodexAppServerConnectionState: Equatable, Sendable {
 
 enum CodexAppServerError: LocalizedError, Equatable, Sendable {
     case executableNotFound
+    case invalidAgentWorkspace(path: String)
+    case emptyAgentPrompt
     case alreadyConnected
     case notConnected
     case malformedMessage
@@ -241,6 +243,10 @@ enum CodexAppServerError: LocalizedError, Equatable, Sendable {
         switch self {
         case .executableNotFound:
             return "Codex could not be found. Install the Codex app or ChatGPT, or bundle the Codex executable with Clicky."
+        case .invalidAgentWorkspace(let path):
+            return "The selected Agent Folder is not an existing directory: \(path)"
+        case .emptyAgentPrompt:
+            return "An agent prompt cannot be empty."
         case .alreadyConnected:
             return "Clicky is already connected to Codex app-server."
         case .notConnected:

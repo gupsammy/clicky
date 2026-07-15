@@ -51,6 +51,8 @@ Worker vars: `ELEVENLABS_VOICE_ID`, `VERTEX_PROJECT_ID`, `VERTEX_REGION`
 
 **Local Codex App-Server**: Agent work uses the local Codex executable and its existing authentication instead of shipping a second agent credential. Clicky checks an explicit `CLICKY_CODEX_EXECUTABLE` override, a bundled executable, the ChatGPT/Codex app bundles, and common Homebrew locations. The stable connection sequence is `initialize` → `initialized` → `account/read`. Notifications and server-initiated requests use separate streams so approval requests retain their request IDs and cannot be silently dropped.
 
+**Safe Agent Workspace**: Every thread start/resume and turn start requires an existing Agent Folder. Clicky reasserts `on-request`, user-reviewed approvals, and `workspace-write`; turns also send an explicit writable-root list containing only the selected folder and disable network access. Thread history is listed by exact `cwd`. The agent API supports start, resume, list, read, turn start, steer, and interrupt without exposing unrestricted defaults to callers.
+
 ## Key Files
 
 | File | Lines | Purpose |
@@ -80,8 +82,11 @@ Worker vars: `ELEVENLABS_VOICE_ID`, `VERTEX_PROJECT_ID`, `VERTEX_REGION`
 | `AgentCore/CodexAppServerProtocol.swift` | ~275 | Minimal stable Codex JSON-RPC types, initialization/account contracts, dynamic JSON values, server notifications, server-initiated requests, and typed errors. |
 | `AgentCore/CodexAppServerProcessTransport.swift` | ~259 | Locates and launches the local Codex executable, frames JSONL stdout, writes requests to stdin, captures bounded stderr, and handles process lifecycle. |
 | `AgentCore/CodexAppServerClient.swift` | ~320 | Actor that performs initialization and account discovery, correlates requests with timeouts, streams notifications and approval requests, and sends typed responses. |
+| `AgentCore/CodexAgentModels.swift` | ~254 | Validated Agent Folder, safe approval/sandbox settings, durable thread and turn models, request contracts, and typed lifecycle notifications. |
+| `AgentCore/CodexAgentClient.swift` | ~153 | Safe app-server thread and turn operations: start, resume, list, read, start turn, steer, and interrupt. |
 | `Package.swift` | ~27 | UI-independent Swift package harness for compiling and testing `AgentCore` without invoking Xcode or touching TCC permissions. |
 | `AgentCoreTests/CodexAppServerCoreTests.swift` | ~320 | Deterministic transport/protocol tests plus an opt-in live handshake against an installed, authenticated Codex app-server. |
+| `AgentCoreTests/CodexAgentThreadTests.swift` | ~510 | Wire-level safety tests for workspace scoping and durable thread/turn operations plus an opt-in ephemeral live thread test. |
 | `.github/workflows/agent-core-tests.yml` | ~19 | Runs the UI-independent AgentCore suite with warnings treated as errors on macOS pull requests and main pushes. |
 | `worker/src/index.ts` | ~142 | Cloudflare Worker proxy. Three routes: `/chat` (Claude), `/tts` (ElevenLabs), `/transcribe-token` (AssemblyAI temp token). |
 
