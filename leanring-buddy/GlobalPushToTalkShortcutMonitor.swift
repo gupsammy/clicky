@@ -13,7 +13,7 @@ import CoreGraphics
 import Foundation
 
 final class GlobalPushToTalkShortcutMonitor: ObservableObject {
-    let shortcutTransitionPublisher = PassthroughSubject<BuddyPushToTalkShortcut.ShortcutTransition, Never>()
+    let shortcutEventPublisher = PassthroughSubject<BuddyPushToTalkShortcut.ShortcutEvent, Never>()
 
     private var globalEventTap: CFMachPort?
     private var globalEventTapRunLoopSource: CFRunLoopSource?
@@ -22,6 +22,8 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
     /// Published so the overlay can hide immediately on key release without
     /// waiting for the async dictation state pipeline to catch up.
     @Published private(set) var isShortcutCurrentlyPressed = false
+    private var activeShortcutKind: BuddyPushToTalkShortcut.ShortcutKind?
+    private var isWaitingForNeutralModifierState = false
 
     deinit {
         stop()
@@ -85,6 +87,8 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
 
     func stop() {
         isShortcutCurrentlyPressed = false
+        activeShortcutKind = nil
+        isWaitingForNeutralModifierState = false
 
         if let globalEventTapRunLoopSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), globalEventTapRunLoopSource, .commonModes)
@@ -109,22 +113,54 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
         }
 
         let eventKeyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
-        let shortcutTransition = BuddyPushToTalkShortcut.shortcutTransition(
-            for: eventType,
-            keyCode: eventKeyCode,
-            modifierFlagsRawValue: event.flags.rawValue,
-            wasShortcutPreviouslyPressed: isShortcutCurrentlyPressed
-        )
+        if let activeShortcutKind {
+            let shortcutTransition = BuddyPushToTalkShortcut.shortcutTransition(
+                for: eventType,
+                keyCode: eventKeyCode,
+                modifierFlagsRawValue: event.flags.rawValue,
+                shortcutOption: activeShortcutKind.shortcutOption,
+                wasShortcutPreviouslyPressed: true
+            )
 
-        switch shortcutTransition {
-        case .none:
-            break
-        case .pressed:
+            if shortcutTransition == .released {
+                self.activeShortcutKind = nil
+                isShortcutCurrentlyPressed = false
+                isWaitingForNeutralModifierState = !BuddyPushToTalkShortcut
+                    .hasNoShortcutModifierFlags(event.flags.rawValue)
+                shortcutEventPublisher.send(BuddyPushToTalkShortcut.ShortcutEvent(
+                    kind: activeShortcutKind,
+                    transition: .released
+                ))
+            }
+
+            return Unmanaged.passUnretained(event)
+        }
+
+        if isWaitingForNeutralModifierState {
+            if BuddyPushToTalkShortcut.hasNoShortcutModifierFlags(event.flags.rawValue) {
+                isWaitingForNeutralModifierState = false
+            }
+            return Unmanaged.passUnretained(event)
+        }
+
+        let newlyPressedShortcutKind = BuddyPushToTalkShortcut.ShortcutKind.allCases
+            .first { shortcutKind in
+                BuddyPushToTalkShortcut.shortcutTransition(
+                    for: eventType,
+                    keyCode: eventKeyCode,
+                    modifierFlagsRawValue: event.flags.rawValue,
+                    shortcutOption: shortcutKind.shortcutOption,
+                    wasShortcutPreviouslyPressed: false
+                ) == .pressed
+            }
+
+        if let newlyPressedShortcutKind {
+            activeShortcutKind = newlyPressedShortcutKind
             isShortcutCurrentlyPressed = true
-            shortcutTransitionPublisher.send(.pressed)
-        case .released:
-            isShortcutCurrentlyPressed = false
-            shortcutTransitionPublisher.send(.released)
+            shortcutEventPublisher.send(BuddyPushToTalkShortcut.ShortcutEvent(
+                kind: newlyPressedShortcutKind,
+                transition: .pressed
+            ))
         }
 
         return Unmanaged.passUnretained(event)

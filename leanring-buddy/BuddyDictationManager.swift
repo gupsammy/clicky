@@ -16,6 +16,7 @@ import Speech
 enum BuddyPushToTalkShortcut {
     enum ShortcutOption {
         case shiftFunction
+        case controlFunction
         case controlOption
         case shiftControl
         case controlOptionSpace
@@ -25,6 +26,8 @@ enum BuddyPushToTalkShortcut {
             switch self {
             case .shiftFunction:
                 return "shift + fn"
+            case .controlFunction:
+                return "control + fn"
             case .controlOption:
                 return "ctrl + option"
             case .shiftControl:
@@ -40,6 +43,8 @@ enum BuddyPushToTalkShortcut {
             switch self {
             case .shiftFunction:
                 return ["shift", "fn"]
+            case .controlFunction:
+                return ["control", "fn"]
             case .controlOption:
                 return ["ctrl", "option"]
             case .shiftControl:
@@ -55,6 +60,8 @@ enum BuddyPushToTalkShortcut {
             switch self {
             case .shiftFunction:
                 return [.shift, .function]
+            case .controlFunction:
+                return [.control, .function]
             case .controlOption:
                 return [.control, .option]
             case .shiftControl:
@@ -66,7 +73,7 @@ enum BuddyPushToTalkShortcut {
 
         fileprivate var spaceShortcutModifierFlags: NSEvent.ModifierFlags? {
             switch self {
-            case .shiftFunction:
+            case .shiftFunction, .controlFunction:
                 return nil
             case .controlOption:
                 return nil
@@ -86,16 +93,50 @@ enum BuddyPushToTalkShortcut {
         case released
     }
 
+    enum ShortcutKind: CaseIterable {
+        case fastDictation
+        case companion
+
+        var shortcutOption: ShortcutOption {
+            switch self {
+            case .fastDictation:
+                return .controlFunction
+            case .companion:
+                return .controlOption
+            }
+        }
+    }
+
+    struct ShortcutEvent {
+        let kind: ShortcutKind
+        let transition: ShortcutTransition
+    }
+
     private enum ShortcutEventType {
         case flagsChanged
         case keyDown
         case keyUp
     }
 
-    static let currentShortcutOption: ShortcutOption = .controlOption
+    static let currentShortcutOption: ShortcutOption = ShortcutKind.companion.shortcutOption
+    static let fastDictationShortcutOption: ShortcutOption = ShortcutKind.fastDictation.shortcutOption
     static let pushToTalkKeyCode: UInt16 = 49 // Space
     static let pushToTalkDisplayText = currentShortcutOption.displayText
     static let pushToTalkTooltipText = "push to talk (\(pushToTalkDisplayText))"
+    private static let shortcutModifierFlagsMask: NSEvent.ModifierFlags = [
+        .shift,
+        .control,
+        .option,
+        .command,
+        .function
+    ]
+
+    static func hasNoShortcutModifierFlags(_ modifierFlagsRawValue: UInt64) -> Bool {
+        ShortcutModifierState.isNeutral(
+            activeRawValue: UInt(modifierFlagsRawValue),
+            relevantMaskRawValue: shortcutModifierFlagsMask.rawValue
+        )
+    }
 
     static func shortcutTransition(
         for event: NSEvent,
@@ -107,6 +148,7 @@ enum BuddyPushToTalkShortcut {
             for: shortcutEventType,
             keyCode: event.keyCode,
             modifierFlags: event.modifierFlags.intersection(.deviceIndependentFlagsMask),
+            shortcutOption: currentShortcutOption,
             wasShortcutPreviouslyPressed: wasShortcutPreviouslyPressed
         )
     }
@@ -124,6 +166,26 @@ enum BuddyPushToTalkShortcut {
             keyCode: keyCode,
             modifierFlags: NSEvent.ModifierFlags(rawValue: UInt(modifierFlagsRawValue))
                 .intersection(.deviceIndependentFlagsMask),
+            shortcutOption: currentShortcutOption,
+            wasShortcutPreviouslyPressed: wasShortcutPreviouslyPressed
+        )
+    }
+
+    static func shortcutTransition(
+        for eventType: CGEventType,
+        keyCode: UInt16,
+        modifierFlagsRawValue: UInt64,
+        shortcutOption: ShortcutOption,
+        wasShortcutPreviouslyPressed: Bool
+    ) -> ShortcutTransition {
+        guard let shortcutEventType = shortcutEventType(for: eventType) else { return .none }
+
+        return shortcutTransition(
+            for: shortcutEventType,
+            keyCode: keyCode,
+            modifierFlags: NSEvent.ModifierFlags(rawValue: UInt(modifierFlagsRawValue))
+                .intersection(.deviceIndependentFlagsMask),
+            shortcutOption: shortcutOption,
             wasShortcutPreviouslyPressed: wasShortcutPreviouslyPressed
         )
     }
@@ -158,12 +220,17 @@ enum BuddyPushToTalkShortcut {
         for shortcutEventType: ShortcutEventType,
         keyCode: UInt16,
         modifierFlags: NSEvent.ModifierFlags,
+        shortcutOption: ShortcutOption,
         wasShortcutPreviouslyPressed: Bool
     ) -> ShortcutTransition {
-        if let modifierOnlyFlags = currentShortcutOption.modifierOnlyFlags {
+        if let modifierOnlyFlags = shortcutOption.modifierOnlyFlags {
             guard shortcutEventType == .flagsChanged else { return .none }
 
-            let isShortcutCurrentlyPressed = modifierFlags.contains(modifierOnlyFlags)
+            let isShortcutCurrentlyPressed = ShortcutModifierState.isExactMatch(
+                activeRawValue: modifierFlags.rawValue,
+                expectedRawValue: modifierOnlyFlags.rawValue,
+                relevantMaskRawValue: shortcutModifierFlagsMask.rawValue
+            )
 
             if isShortcutCurrentlyPressed && !wasShortcutPreviouslyPressed {
                 return .pressed
@@ -176,7 +243,7 @@ enum BuddyPushToTalkShortcut {
             return .none
         }
 
-        guard let pushToTalkModifierFlags = currentShortcutOption.spaceShortcutModifierFlags else {
+        guard let pushToTalkModifierFlags = shortcutOption.spaceShortcutModifierFlags else {
             return .none
         }
 
@@ -212,6 +279,7 @@ private enum BuddyDictationStartSource {
 private struct BuddyDictationDraftCallbacks {
     let updateDraftText: (String) -> Void
     let submitDraftText: (String) -> Void
+    let dictationSessionFinished: () -> Void
 }
 
 @MainActor
@@ -312,13 +380,15 @@ final class BuddyDictationManager: NSObject, ObservableObject {
     func startPushToTalkFromKeyboardShortcut(
         currentDraftText: String,
         updateDraftText: @escaping (String) -> Void,
-        submitDraftText: @escaping (String) -> Void
+        submitDraftText: @escaping (String) -> Void,
+        dictationSessionFinished: @escaping () -> Void = {}
     ) async {
         await startPushToTalk(
             startSource: .keyboardShortcut,
             currentDraftText: currentDraftText,
             updateDraftText: updateDraftText,
             submitDraftText: submitDraftText,
+            dictationSessionFinished: dictationSessionFinished,
             shouldAutomaticallySubmitFinalDraftOnStop: currentDraftText
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .isEmpty
@@ -350,7 +420,9 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         audioEngine.inputNode.removeTap(onBus: 0)
         activeTranscriptionSession?.cancel()
 
+        let currentDraftCallbacks = draftCallbacks
         resetSessionState()
+        currentDraftCallbacks?.dictationSessionFinished()
     }
 
     func requestInitialPushToTalkPermissionsIfNeeded() async {
@@ -383,9 +455,13 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         currentDraftText: String,
         updateDraftText: @escaping (String) -> Void,
         submitDraftText: @escaping (String) -> Void,
+        dictationSessionFinished: @escaping () -> Void = {},
         shouldAutomaticallySubmitFinalDraftOnStop: Bool
     ) async {
-        guard !isDictationInProgress else { return }
+        guard !isDictationInProgress else {
+            dictationSessionFinished()
+            return
+        }
 
         print("🎙️ BuddyDictationManager: start requested (\(startSource))")
 
@@ -411,16 +487,19 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         guard await requestMicrophoneAndSpeechPermissionsWithoutDuplicatePrompts() else {
             print("🎙️ BuddyDictationManager: permissions missing or denied")
             isPreparingToRecord = false
+            dictationSessionFinished()
             return
         }
         guard !Task.isCancelled else {
             print("🎙️ BuddyDictationManager: start cancelled (shortcut released during permission check)")
             isPreparingToRecord = false
+            dictationSessionFinished()
             return
         }
         guard pendingStartRequestIdentifier == startRequestIdentifier else {
             print("🎙️ BuddyDictationManager: start request superseded")
             isPreparingToRecord = false
+            dictationSessionFinished()
             return
         }
 
@@ -428,7 +507,8 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         latestRecognizedText = ""
         draftCallbacks = BuddyDictationDraftCallbacks(
             updateDraftText: updateDraftText,
-            submitDraftText: submitDraftText
+            submitDraftText: submitDraftText,
+            dictationSessionFinished: dictationSessionFinished
         )
         activeStartSource = startSource
         shouldAutomaticallySubmitFinalDraft = shouldAutomaticallySubmitFinalDraftOnStop
@@ -447,7 +527,9 @@ final class BuddyDictationManager: NSObject, ObservableObject {
 
         guard !Task.isCancelled else {
             print("🎙️ BuddyDictationManager: start cancelled (shortcut released before recording began)")
+            let currentDraftCallbacks = draftCallbacks
             resetSessionState()
+            currentDraftCallbacks?.dictationSessionFinished()
             return
         }
 
@@ -458,7 +540,9 @@ final class BuddyDictationManager: NSObject, ObservableObject {
                 audioEngine.stop()
                 audioEngine.inputNode.removeTap(onBus: 0)
                 activeTranscriptionSession?.cancel()
+                let currentDraftCallbacks = draftCallbacks
                 resetSessionState()
+                currentDraftCallbacks?.dictationSessionFinished()
                 return
             }
             if startSource == .microphoneButton {
@@ -473,7 +557,9 @@ final class BuddyDictationManager: NSObject, ObservableObject {
                 fallback: "couldn't start voice input. try again."
             )
             print("❌ BuddyDictationManager: failed to start recognition session (\(transcriptionProvider.displayName)): \(error)")
+            let currentDraftCallbacks = draftCallbacks
             resetSessionState()
+            currentDraftCallbacks?.dictationSessionFinished()
         }
     }
 
@@ -603,10 +689,10 @@ final class BuddyDictationManager: NSObject, ObservableObject {
 
         resetSessionState()
 
-        guard shouldSubmitFinalDraft else { return }
-        guard !finalTranscriptText.isEmpty else { return }
-
-        currentDraftCallbacks?.submitDraftText(finalDraftText)
+        if shouldSubmitFinalDraft && !finalTranscriptText.isEmpty {
+            currentDraftCallbacks?.submitDraftText(finalDraftText)
+        }
+        currentDraftCallbacks?.dictationSessionFinished()
     }
 
     private func composeDraftText(withTranscribedText transcribedText: String) -> String {

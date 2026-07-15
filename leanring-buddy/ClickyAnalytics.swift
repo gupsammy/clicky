@@ -79,6 +79,33 @@ enum ClickyAnalytics {
         PostHogSDK.shared.capture("push_to_talk_released")
     }
 
+    static func trackFastDictationStarted() {
+        PostHogSDK.shared.capture("fast_dictation_started")
+    }
+
+    static func trackFastDictationReleased() {
+        PostHogSDK.shared.capture("fast_dictation_released")
+    }
+
+    static func trackFastDictationCompleted(
+        characterCount: Int,
+        insertionMethod: FocusedTextInsertionMethod,
+        latencyMilliseconds: Int?
+    ) {
+        var properties: [String: Any] = [
+            "character_count": characterCount,
+            "insertion_method": insertionMethod.rawValue
+        ]
+        if let latencyMilliseconds {
+            properties["latency_ms"] = latencyMilliseconds
+        }
+        PostHogSDK.shared.capture("fast_dictation_completed", properties: properties)
+    }
+
+    static func trackFastDictationFailed() {
+        PostHogSDK.shared.capture("fast_dictation_failed")
+    }
+
     /// Transcription completed and the user's message is being sent to the AI.
     static func trackUserMessageSent(transcript: String) {
         PostHogSDK.shared.capture("user_message_sent", properties: [

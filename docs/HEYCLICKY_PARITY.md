@@ -369,7 +369,7 @@ PR 8  Agent HUD/history/attachments/artifacts/notch UX                 3-4 turns
 PR 9  Realtime voice router + local memory/skills                      3-4 turns
 ```
 
-As of July 15, 2026, PRs 1-4 are open as green drafts and PR 5 is in implementation. They establish the clean-room research baseline, subscription-backed Codex process protocol, safe workspace-scoped durable threads, and HUD-independent concurrent task state. No PR has been merged.
+As of July 15, 2026, PRs 1-5 are open as green drafts and PR 6 is in implementation. They establish the clean-room research baseline, subscription-backed Codex process protocol, safe workspace-scoped durable threads, HUD-independent concurrent task state, and OpenAI Realtime transcription with Worker-minted ephemeral credentials. No PR has been merged.
 
 Each PR should be developed in an isolated worktree, verified independently, opened as draft, and watched for both review comments and CI. Actionable feedback should be pulled, fixed, and re-verified until checks are green. Nothing should be merged without explicit user instruction.
 
