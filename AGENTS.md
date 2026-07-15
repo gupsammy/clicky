@@ -20,7 +20,8 @@ All API keys live on a Cloudflare Worker proxy — nothing sensitive ships in th
 - **Screen Capture**: ScreenCaptureKit (macOS 14.2+), multi-monitor support
 - **Voice Input**: Push-to-talk via `AVAudioEngine` + pluggable transcription-provider layer. System-wide keyboard shortcut via listen-only CGEvent tap.
 - **Element Pointing**: Claude embeds `[POINT:x,y:label:screenN]` tags in responses. The overlay parses these, maps coordinates to the correct monitor, and animates the blue cursor along a bezier arc to the target.
-- **Concurrency**: `@MainActor` isolation, async/await throughout
+- **Codex Agents**: The UI-independent foundation launches a local Codex app-server over JSONL stdio, performs the required initialization handshake, reads ChatGPT subscription authentication, correlates requests, and streams notifications plus server-initiated approval requests. Agent threads and UI are not wired yet.
+- **Concurrency**: UI state uses `@MainActor`; the Codex app-server client is an actor and process I/O is lock-protected before crossing into async streams.
 - **Analytics**: PostHog via `ClickyAnalytics.swift`
 
 ### API Proxy (Cloudflare Worker)
@@ -48,6 +49,8 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 
 **Transient Cursor Mode**: When "Show Clicky" is off, pressing the hotkey fades in the cursor overlay for the duration of the interaction (recording → response → TTS → optional pointing), then fades it out automatically after 1 second of inactivity.
 
+**Local Codex App-Server**: Agent work uses the local Codex executable and its existing authentication instead of shipping a second agent credential. Clicky checks an explicit `CLICKY_CODEX_EXECUTABLE` override, a bundled executable, the ChatGPT/Codex app bundles, and common Homebrew locations. The stable connection sequence is `initialize` → `initialized` → `account/read`. Notifications and server-initiated requests use separate streams so approval requests retain their request IDs and cannot be silently dropped.
+
 ## Key Files
 
 | File | Lines | Purpose |
@@ -74,6 +77,12 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 | `ClickyAnalytics.swift` | ~121 | PostHog analytics integration for usage tracking. |
 | `WindowPositionManager.swift` | ~262 | Window placement logic, Screen Recording permission flow, and accessibility permission helpers. |
 | `AppBundleConfiguration.swift` | ~28 | Runtime configuration reader for keys stored in the app bundle Info.plist. |
+| `AgentCore/CodexAppServerProtocol.swift` | ~275 | Minimal stable Codex JSON-RPC types, initialization/account contracts, dynamic JSON values, server notifications, server-initiated requests, and typed errors. |
+| `AgentCore/CodexAppServerProcessTransport.swift` | ~259 | Locates and launches the local Codex executable, frames JSONL stdout, writes requests to stdin, captures bounded stderr, and handles process lifecycle. |
+| `AgentCore/CodexAppServerClient.swift` | ~320 | Actor that performs initialization and account discovery, correlates requests with timeouts, streams notifications and approval requests, and sends typed responses. |
+| `Package.swift` | ~27 | UI-independent Swift package harness for compiling and testing `AgentCore` without invoking Xcode or touching TCC permissions. |
+| `AgentCoreTests/CodexAppServerCoreTests.swift` | ~320 | Deterministic transport/protocol tests plus an opt-in live handshake against an installed, authenticated Codex app-server. |
+| `.github/workflows/agent-core-tests.yml` | ~19 | Runs the UI-independent AgentCore suite with warnings treated as errors on macOS pull requests and main pushes. |
 | `worker/src/index.ts` | ~142 | Cloudflare Worker proxy. Three routes: `/chat` (Claude), `/tts` (ElevenLabs), `/transcribe-token` (AssemblyAI temp token). |
 
 ## Build & Run
@@ -83,6 +92,14 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 open leanring-buddy.xcodeproj
 
 # Select the leanring-buddy scheme, set signing team, Cmd+R to build and run
+
+# Compile and run the UI-independent Codex app-server tests
+swift test
+
+# Opt into the local ChatGPT-subscription handshake test
+CLICKY_RUN_CODEX_INTEGRATION_TESTS=1 \
+CLICKY_CODEX_EXECUTABLE=/Applications/ChatGPT.app/Contents/Resources/codex \
+swift test --filter CodexAppServerLiveTests/testAuthenticatedChatGPTCodexHandshake
 
 # Known non-blocking warnings: Swift 6 concurrency warnings,
 # deprecated onChange warning in OverlayWindow.swift. Do NOT attempt to fix these.
