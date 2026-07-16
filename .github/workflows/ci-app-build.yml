@@ -1,0 +1,52 @@
+name: App Build
+
+on:
+  pull_request:
+    paths:
+      - "**/*.swift"
+      - "leanring-buddy/**"
+      - "leanring-buddy.xcodeproj/**"
+      - ".github/workflows/ci-app-build.yml"
+  push:
+    branches: [main]
+    paths:
+      - "**/*.swift"
+      - "leanring-buddy/**"
+      - "leanring-buddy.xcodeproj/**"
+      - ".github/workflows/ci-app-build.yml"
+
+# Rapid pushes to the same branch cancel the previous in-flight build —
+# macOS runner minutes are the expensive resource here
+concurrency:
+  group: app-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Resolve Swift package dependencies
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project leanring-buddy.xcodeproj \
+            -scheme leanring-buddy
+
+      # CODE_SIGNING_ALLOWED=NO: CI has no signing identity; we only care
+      # that the code compiles, not that the .app is distributable
+      - name: Build app (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project leanring-buddy.xcodeproj \
+            -scheme leanring-buddy \
+            -destination "platform=macOS" \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY=""
