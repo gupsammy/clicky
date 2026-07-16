@@ -10,6 +10,13 @@ on:
     paths:
       - "worker/**"
       - ".github/workflows/ci-worker.yml"
+  # Manual trigger for PRs whose base branch predates this workflow (stacked PRs)
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to validate (checks out the PR head)"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -24,6 +31,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          # On manual dispatch, validate the PR's head instead of main
+          ref: ${{ inputs.pr_number && format('refs/pull/{0}/head', inputs.pr_number) || github.ref }}
 
       - name: Setup Node
         uses: actions/setup-node@v4

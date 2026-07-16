@@ -14,11 +14,18 @@ on:
       - "leanring-buddy/**"
       - "leanring-buddy.xcodeproj/**"
       - ".github/workflows/ci-app-build.yml"
+  # Manual trigger for PRs whose base branch predates this workflow (stacked PRs)
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to build (checks out the PR head)"
+        required: true
+        type: string
 
 # Rapid pushes to the same branch cancel the previous in-flight build —
 # macOS runner minutes are the expensive resource here
 concurrency:
-  group: app-build-${{ github.ref }}
+  group: app-build-${{ inputs.pr_number || github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -31,6 +38,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          # On manual dispatch, build the PR's head instead of main
+          ref: ${{ inputs.pr_number && format('refs/pull/{0}/head', inputs.pr_number) || github.ref }}
 
       - name: Resolve Swift package dependencies
         run: |
