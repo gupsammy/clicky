@@ -5,7 +5,7 @@
 
 ## Overview
 
-macOS menu bar companion app. Lives entirely in the macOS status bar (no dock icon, no main window). Clicking the menu bar icon opens a custom floating panel with companion voice controls. Uses push-to-talk (ctrl+option) to capture voice input, transcribes it through OpenAI Realtime when configured, and sends the transcript + a screenshot of the user's screen to Claude. Claude responds with text (streamed via SSE) and voice (ElevenLabs TTS). A blue cursor overlay can fly to and point at UI elements Claude references on any connected monitor.
+macOS menu bar companion app. Lives entirely in the macOS status bar (no dock icon, no main window). Clicking the menu bar icon opens a custom floating panel with companion voice controls. `control + fn` performs literal focused-field dictation; `ctrl + option` sends the transcript plus a screenshot to the screen-aware companion. Voice uses OpenAI Realtime when configured. Claude responds with text (streamed via SSE) and voice (ElevenLabs TTS). A blue cursor overlay can fly to and point at UI elements Claude references on any connected monitor.
 
 All API keys live on a Cloudflare Worker proxy — nothing sensitive ships in the app.
 
@@ -18,7 +18,7 @@ All API keys live on a Cloudflare Worker proxy — nothing sensitive ships in th
 - **Speech-to-Text**: OpenAI Realtime streaming (`gpt-realtime-whisper`) via websocket and a Worker-minted ephemeral client secret. Apple Speech is the no-API fallback; AssemblyAI remains available as an explicitly selected legacy provider.
 - **Text-to-Speech**: ElevenLabs (`eleven_flash_v2_5` model) via Cloudflare Worker proxy
 - **Screen Capture**: ScreenCaptureKit (macOS 14.2+), multi-monitor support
-- **Voice Input**: Push-to-talk via `AVAudioEngine` + pluggable transcription-provider layer. System-wide keyboard shortcut via listen-only CGEvent tap.
+- **Voice Input**: Push-to-talk via `AVAudioEngine` + pluggable transcription-provider layer. A listen-only CGEvent tap distinguishes `control + fn` fast dictation from `ctrl + option` companion requests.
 - **Element Pointing**: Claude embeds `[POINT:x,y:label:screenN]` tags in responses. The overlay parses these, maps coordinates to the correct monitor, and animates the blue cursor along a bezier arc to the target.
 - **Codex Agents**: The UI-independent foundation launches a local Codex app-server over JSONL stdio, performs the required initialization handshake, reads ChatGPT subscription authentication, correlates requests, and streams notifications plus server-initiated approval requests. Agent threads and UI are not wired yet.
 - **Concurrency**: UI state uses `@MainActor`; the Codex app-server client is an actor and process I/O is lock-protected before crossing into async streams.
@@ -50,6 +50,8 @@ Worker vars: `ELEVENLABS_VOICE_ID`, `VERTEX_PROJECT_ID`, `VERTEX_REGION`
 
 **OpenAI Realtime Dictation**: The app never stores a standard OpenAI API key. It asks the Worker for a one-minute client secret, opens one authenticated websocket per push-to-talk session, converts microphone audio to 24 kHz mono PCM16, streams base64 audio append events, and manually commits the buffer on key-up. The provider reconciles delta and completed events by `item_id`. GA `gpt-realtime-whisper` does not accept prompt steering, so contextual vocabulary stays at the dictation-manager seam for a later screen-aware cleanup pass.
 
+**Focused-Field Dictation**: `control + fn` captures the frontmost app and exact focused Accessibility element before audio starts. Secure, disabled, and non-text controls are rejected; final text is inserted only if the same app and element remain focused and editable. Insertion prefers the selected-text attribute, falls back to tested UTF-16 range replacement, then emits Unicode keyboard events for text controls without writable Accessibility attributes. The compatibility fallback never reads or mutates the user's clipboard.
+
 **Transient Cursor Mode**: When "Show Clicky" is off, pressing the hotkey fades in the cursor overlay for the duration of the interaction (recording → response → TTS → optional pointing), then fades it out automatically after 1 second of inactivity.
 
 **Local Codex App-Server**: Agent work uses the local Codex executable and its existing authentication instead of shipping a second agent credential. Clicky checks an explicit `CLICKY_CODEX_EXECUTABLE` override, a bundled executable, the ChatGPT/Codex app bundles, and common Homebrew locations. The stable connection sequence is `initialize` → `initialized` → `account/read`. Notifications and server-initiated requests use separate streams so approval requests retain their request IDs and cannot be silently dropped.
@@ -63,21 +65,24 @@ Worker vars: `ELEVENLABS_VOICE_ID`, `VERTEX_PROJECT_ID`, `VERTEX_REGION`
 | File | Lines | Purpose |
 |------|-------|---------|
 | `leanring_buddyApp.swift` | ~89 | Menu bar app entry point. Uses `@NSApplicationDelegateAdaptor` with `CompanionAppDelegate` which creates `MenuBarPanelManager` and starts `CompanionManager`. No main window — the app lives entirely in the status bar. |
-| `CompanionManager.swift` | ~1026 | Central state machine. Owns dictation, shortcut monitoring, screen capture, Claude API, ElevenLabs TTS, and overlay management. Tracks voice state (idle/listening/processing/responding), conversation history, model selection, and cursor visibility. Coordinates the full push-to-talk → screenshot → Claude → TTS → pointing pipeline. |
+| `CompanionManager.swift` | ~1140 | Central state machine. Owns dictation, shortcut routing, focused-field insertion, screen capture, Claude API, ElevenLabs TTS, and overlay management. Tracks voice state (idle/listening/processing/responding), conversation history, model selection, and cursor visibility. Coordinates literal dictation and the full push-to-talk → screenshot → Claude → TTS → pointing pipeline. |
 | `MenuBarPanelManager.swift` | ~243 | NSStatusItem + custom NSPanel lifecycle. Creates the menu bar icon, manages the floating companion panel (show/hide/position), installs click-outside-to-dismiss monitor. |
 | `CompanionPanelView.swift` | ~761 | SwiftUI panel content for the menu bar dropdown. Shows companion status, push-to-talk instructions, model picker (Sonnet/Opus), permissions UI, DM feedback button, and quit button. Dark aesthetic using `DS` design system. |
 | `OverlayWindow.swift` | ~881 | Full-screen transparent overlay hosting the blue cursor, response text, waveform, and spinner. Handles cursor animation, element pointing with bezier arcs, multi-monitor coordinate mapping, and fade-out transitions. |
 | `CompanionResponseOverlay.swift` | ~217 | SwiftUI view for the response text bubble and waveform displayed next to the cursor in the overlay. |
 | `CompanionScreenCaptureUtility.swift` | ~132 | Multi-monitor screenshot capture using ScreenCaptureKit. Returns labeled image data for each connected display. |
-| `BuddyDictationManager.swift` | ~866 | Push-to-talk voice pipeline. Handles microphone capture via `AVAudioEngine`, provider-aware permission checks, keyboard/button dictation sessions, transcript finalization, shortcut parsing, contextual keyterms, and live audio-level reporting for waveform feedback. |
+| `BuddyDictationManager.swift` | ~950 | Push-to-talk voice pipeline. Handles microphone capture via `AVAudioEngine`, provider-aware permission checks, keyboard/button dictation sessions, transcript finalization, dual-shortcut parsing, contextual keyterms, and live audio-level reporting for waveform feedback. |
 | `BuddyTranscriptionProvider.swift` | ~100 | Protocol surface and provider factory for voice transcription backends. Resolves provider based on `VoiceTranscriptionProvider` in Info.plist — AssemblyAI, OpenAI, or Apple Speech. |
 | `AssemblyAIStreamingTranscriptionProvider.swift` | ~478 | Streaming transcription provider. Fetches temp tokens from the Cloudflare Worker, opens an AssemblyAI v3 websocket, streams PCM16 audio, tracks turn-based transcripts, and delivers finalized text on key-up. Shares a single URLSession across all sessions. |
 | `OpenAIRealtimeTranscriptionProvider.swift` | ~418 | OpenAI-first streaming provider. Fetches an ephemeral client secret from the Worker, streams 24 kHz PCM16 to Realtime, commits on key-up, and delivers partial/final transcripts without embedding an API key. |
 | `ClickyProxyAuthorization.swift` | ~64 | Reads the deployment-specific Worker bearer token from the macOS Keychain and authorizes proxy requests without embedding it in the app. |
 | `DictationCore/OpenAIRealtimeTranscriptionProtocol.swift` | ~188 | UI-independent session/client event encoding, server event parsing, and item-aware transcript accumulation for OpenAI Realtime. |
+| `FocusedTextInsertionService.swift` | ~390 | Captures and revalidates editable focused Accessibility elements, rejects secure fields, inserts final dictation through native text attributes, and verifies a clipboard-free Unicode event fallback against readable field state. |
+| `DictationCore/FocusedTextInsertionPlan.swift` | ~91 | Pure UTF-16 range validation, word-boundary spacing, and replacement plan shared by Accessibility value insertion and deterministic tests. |
+| `DictationCore/ShortcutModifierState.swift` | ~19 | Pure exact-modifier and neutral-state matching used to keep fast and companion shortcut chords unambiguous. |
 | `AppleSpeechTranscriptionProvider.swift` | ~147 | Local fallback transcription provider backed by Apple's Speech framework. |
 | `BuddyAudioConversionSupport.swift` | ~108 | Audio conversion helpers. Converts live mic buffers to PCM16 mono audio and builds WAV payloads for upload-based providers. |
-| `GlobalPushToTalkShortcutMonitor.swift` | ~132 | System-wide push-to-talk monitor. Owns the listen-only `CGEvent` tap and publishes press/release transitions. |
+| `GlobalPushToTalkShortcutMonitor.swift` | ~168 | System-wide push-to-talk monitor. Owns the listen-only `CGEvent` tap, resolves exact fast-dictation versus companion chords, requires a neutral state between chords, and publishes typed press/release events. |
 | `ClaudeAPI.swift` | ~291 | Claude vision API client with streaming (SSE) and non-streaming modes. TLS warmup optimization, image MIME detection, conversation history support. |
 | `OpenAIAPI.swift` | ~142 | OpenAI GPT vision API client. |
 | `ElevenLabsTTSClient.swift` | ~81 | ElevenLabs TTS client. Sends text to the Worker proxy, plays back audio via `AVAudioPlayer`. Exposes `isPlaying` for transient cursor scheduling. |
@@ -98,6 +103,8 @@ Worker vars: `ELEVENLABS_VOICE_ID`, `VERTEX_PROJECT_ID`, `VERTEX_REGION`
 | `AgentCoreTests/CodexAgentThreadTests.swift` | ~510 | Wire-level safety tests for workspace scoping and durable thread/turn operations plus an opt-in ephemeral live thread test. |
 | `AgentCoreTests/CodexAgentTaskStoreTests.swift` | ~525 | Reducer tests for concurrency, deltas, activities, approvals, terminal states, multi-turn reset, ordering, and memory bounds. |
 | `DictationCoreTests/OpenAIRealtimeTranscriptionProtocolTests.swift` | ~69 | Deterministic tests for Realtime session configuration, audio encoding, event parsing, and transcript reconciliation. |
+| `DictationCoreTests/FocusedTextInsertionPlanTests.swift` | ~58 | Deterministic caret insertion, word-boundary spacing, selection replacement, Unicode, and stale-range safety tests. |
+| `DictationCoreTests/ShortcutModifierStateTests.swift` | ~36 | Exact chord, extra-modifier rejection, irrelevant modifier, and neutral-state tests. |
 | `.github/workflows/agent-core-tests.yml` | ~19 | Runs the UI-independent agent and dictation suites with warnings treated as errors on macOS pull requests and main pushes. |
 | `worker/src/index.ts` | ~224 | Cloudflare Worker proxy for Claude chat, ElevenLabs TTS, AssemblyAI tokens, and ephemeral OpenAI Realtime transcription secrets. |
 

@@ -67,6 +67,7 @@ final class CompanionManager: ObservableObject {
     let buddyDictationManager = BuddyDictationManager()
     let globalPushToTalkShortcutMonitor = GlobalPushToTalkShortcutMonitor()
     let overlayWindowManager = OverlayWindowManager()
+    private let focusedTextInsertionService = FocusedTextInsertionService()
     // Response text is now displayed inline on the cursor overlay via
     // streamingResponseText, so no separate response overlay manager is needed.
 
@@ -95,6 +96,9 @@ final class CompanionManager: ObservableObject {
     private var audioPowerCancellable: AnyCancellable?
     private var accessibilityCheckTimer: Timer?
     private var pendingKeyboardShortcutStartTask: Task<Void, Never>?
+    private var activeFastDictationFocusContext: DictationFocusContext?
+    private var activeFastDictationInsertionTask: Task<Void, Never>?
+    private var fastDictationStartedAt: Date?
     /// Scheduled hide for transient cursor mode — cancelled if the user
     /// speaks again before the delay elapses.
     private var transientHideTask: Task<Void, Never>?
@@ -299,6 +303,10 @@ final class CompanionManager: ObservableObject {
     func stop() {
         globalPushToTalkShortcutMonitor.stop()
         buddyDictationManager.cancelCurrentDictation()
+        activeFastDictationFocusContext = nil
+        fastDictationStartedAt = nil
+        activeFastDictationInsertionTask?.cancel()
+        activeFastDictationInsertionTask = nil
         overlayWindowManager.hideOverlay()
         transientHideTask?.cancel()
 
@@ -483,17 +491,30 @@ final class CompanionManager: ObservableObject {
 
     private func bindShortcutTransitions() {
         shortcutTransitionCancellable = globalPushToTalkShortcutMonitor
-            .shortcutTransitionPublisher
+            .shortcutEventPublisher
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] transition in
-                self?.handleShortcutTransition(transition)
+            .sink { [weak self] shortcutEvent in
+                self?.handleShortcutEvent(shortcutEvent)
             }
     }
 
-    private func handleShortcutTransition(_ transition: BuddyPushToTalkShortcut.ShortcutTransition) {
+    private func handleShortcutEvent(_ shortcutEvent: BuddyPushToTalkShortcut.ShortcutEvent) {
+        switch shortcutEvent.kind {
+        case .companion:
+            handleCompanionShortcutTransition(shortcutEvent.transition)
+        case .fastDictation:
+            handleFastDictationShortcutTransition(shortcutEvent.transition)
+        }
+    }
+
+    private func handleCompanionShortcutTransition(
+        _ transition: BuddyPushToTalkShortcut.ShortcutTransition
+    ) {
         switch transition {
         case .pressed:
             guard !buddyDictationManager.isDictationInProgress else { return }
+            activeFastDictationFocusContext = nil
+            fastDictationStartedAt = nil
             // Don't register push-to-talk while the onboarding video is playing
             guard !showOnboardingVideo else { return }
 
@@ -557,6 +578,109 @@ final class CompanionManager: ObservableObject {
         case .none:
             break
         }
+    }
+
+    private func handleFastDictationShortcutTransition(
+        _ transition: BuddyPushToTalkShortcut.ShortcutTransition
+    ) {
+        switch transition {
+        case .pressed:
+            guard !buddyDictationManager.isDictationInProgress else { return }
+            guard !showOnboardingVideo else { return }
+            activeFastDictationFocusContext = nil
+            fastDictationStartedAt = nil
+            guard !buddyDictationManager.needsInitialPermissionPrompt else {
+                reportFastDictationFailure(
+                    "Finish microphone setup in Clicky before using fast dictation."
+                )
+                return
+            }
+
+            do {
+                activeFastDictationFocusContext = try focusedTextInsertionService
+                    .captureFocusContext()
+                fastDictationStartedAt = Date()
+                buddyDictationManager.lastErrorMessage = nil
+            } catch {
+                reportFastDictationFailure(error.localizedDescription)
+                return
+            }
+
+            NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+            currentResponseTask?.cancel()
+            currentResponseTask = nil
+            elevenLabsTTSClient.stopPlayback()
+            clearDetectedElementLocation()
+            ClickyAnalytics.trackFastDictationStarted()
+
+            pendingKeyboardShortcutStartTask?.cancel()
+            pendingKeyboardShortcutStartTask = Task {
+                await buddyDictationManager.startPushToTalkFromKeyboardShortcut(
+                    currentDraftText: "",
+                    updateDraftText: { _ in
+                        // Literal dictation inserts only the reconciled final
+                        // transcript so partial revisions never mutate user text.
+                    },
+                    submitDraftText: { [weak self] finalTranscript in
+                        guard let self else { return }
+                        guard let focusContext = self.activeFastDictationFocusContext else { return }
+                        let fastDictationStartedAt = self.fastDictationStartedAt
+
+                        self.activeFastDictationInsertionTask?.cancel()
+                        self.activeFastDictationInsertionTask = Task { @MainActor [weak self] in
+                            guard let self else { return }
+                            do {
+                                let insertionMethod = try await self.focusedTextInsertionService.insert(
+                                    transcriptText: finalTranscript,
+                                    into: focusContext
+                                )
+                                ClickyAnalytics.trackFastDictationCompleted(
+                                    characterCount: finalTranscript.count,
+                                    insertionMethod: insertionMethod,
+                                    latencyMilliseconds: self.fastDictationLatencyMilliseconds(
+                                        since: fastDictationStartedAt
+                                    )
+                                )
+                            } catch is CancellationError {
+                                // A newer session or stop() superseded this insertion.
+                            } catch {
+                                self.reportFastDictationFailure(error.localizedDescription)
+                            }
+                        }
+                        self.activeFastDictationFocusContext = nil
+                        self.fastDictationStartedAt = nil
+                    },
+                    dictationSessionFinished: { [weak self] in
+                        if let self,
+                           self.activeFastDictationFocusContext != nil,
+                           let errorMessage = self.buddyDictationManager.lastErrorMessage {
+                            self.reportFastDictationFailure(errorMessage)
+                        }
+                        self?.activeFastDictationFocusContext = nil
+                        self?.fastDictationStartedAt = nil
+                    }
+                )
+            }
+        case .released:
+            guard activeFastDictationFocusContext != nil else { return }
+            ClickyAnalytics.trackFastDictationReleased()
+            pendingKeyboardShortcutStartTask?.cancel()
+            pendingKeyboardShortcutStartTask = nil
+            buddyDictationManager.stopPushToTalkFromKeyboardShortcut()
+        case .none:
+            break
+        }
+    }
+
+    private func fastDictationLatencyMilliseconds(since startDate: Date?) -> Int? {
+        guard let startDate else { return nil }
+        return max(0, Int(Date().timeIntervalSince(startDate) * 1_000))
+    }
+
+    private func reportFastDictationFailure(_ errorMessage: String) {
+        buddyDictationManager.reportExternalFailure(errorMessage)
+        NSSound.beep()
+        ClickyAnalytics.trackFastDictationFailed()
     }
 
     // MARK: - Companion Prompt
