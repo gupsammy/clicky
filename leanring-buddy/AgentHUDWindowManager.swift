@@ -50,6 +50,10 @@ final class AgentHUDWindowManager {
     }
 
     deinit {
+        // Panels are not ordered out here: this manager lives for the app's
+        // lifetime and its panels use isReleasedWhenClosed = false, so ARC
+        // teardown suffices. If this manager ever becomes shorter-lived, call
+        // hide() before releasing it so no orphaned panels stay on screen.
         if let screenChangeObserver {
             NotificationCenter.default.removeObserver(screenChangeObserver)
         }

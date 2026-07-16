@@ -804,6 +804,46 @@ final class CodexAgentTaskStoreTests: XCTestCase {
         XCTAssertTrue(currentSnapshots.first?.pendingUserInputs.isEmpty == true)
     }
 
+    func testRemovingAThreadPrunesItsResolvedRequestDedupeMemory() async throws {
+        let store = CodexAgentTaskStore()
+        let thread = makeThread(id: "thread_pruned_dedupe", preview: "Pruned")
+        await store.register(thread: thread)
+
+        let userInputRequest = CodexAppServerRequest(
+            id: .string("input_pruned"),
+            method: "item/tool/requestUserInput",
+            params: userInputParameters(
+                threadID: thread.id,
+                turnID: "turn_pruned",
+                itemID: "input_item_pruned",
+                autoResolutionMs: nil
+            )
+        )
+        await store.apply(serverRequest: userInputRequest)
+        await store.resolveUserInput(requestID: .string("input_pruned"))
+
+        // While the thread exists, a duplicate delivery must stay deduplicated.
+        await store.apply(serverRequest: userInputRequest)
+        let snapshotsWhileThreadExists = await store.currentSnapshots()
+        XCTAssertTrue(
+            snapshotsWhileThreadExists.first?.pendingUserInputs.isEmpty == true
+        )
+
+        await store.remove(threadID: thread.id)
+
+        // Once the thread is removed its dedupe memory must go with it: the
+        // same request ID delivered for a fresh registration of the thread
+        // surfaces again instead of being dropped by leaked resolved state.
+        await store.register(thread: thread)
+        await store.apply(serverRequest: userInputRequest)
+        let snapshotsAfterThreadRemoval = await store.currentSnapshots()
+        let snapshotAfterThreadRemoval = try XCTUnwrap(snapshotsAfterThreadRemoval.first)
+        XCTAssertEqual(
+            snapshotAfterThreadRemoval.pendingUserInputs.map(\.requestID),
+            [.string("input_pruned")]
+        )
+    }
+
     func testConnectionFailureMakesActiveTasksDurablyRecoverable() async throws {
         let store = CodexAgentTaskStore()
         let activeThread = makeThread(id: "thread_disconnected", preview: "Active")

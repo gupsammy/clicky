@@ -61,13 +61,21 @@ actor CodexAgentTaskStore {
 
     private let snapshotContinuation: AsyncStream<[CodexAgentTaskSnapshot]>.Continuation
     private var taskStatesByThreadID: [String: MutableTaskState] = [:]
-    private var resolvedServerRequestIDs: Set<CodexAppServerRequestID> = []
     private var nextEventSequence: Int64 = 1
     private var notificationMonitoringTask: Task<Void, Never>?
     private var serverRequestMonitoringTask: Task<Void, Never>?
     private var automaticUserInputResolutionTasks: [
         CodexAppServerRequestID: Task<Void, Never>
     ] = [:]
+    // Resolved request IDs are remembered per thread so remove(threadID:) can
+    // prune them when the thread goes away; a single flat set would grow for
+    // the lifetime of the actor. Resolutions whose thread can no longer be
+    // determined land in the unknown-thread set, which only resets when a new
+    // monitoring session starts.
+    private var resolvedServerRequestIDsByThreadID: [
+        String: Set<CodexAppServerRequestID>
+    ] = [:]
+    private var resolvedServerRequestIDsWithUnknownThread: Set<CodexAppServerRequestID> = []
     private var userInputRequestIDsBeingResolved: Set<CodexAppServerRequestID> = []
 
     init() {
@@ -91,6 +99,8 @@ actor CodexAgentTaskStore {
 
     func startMonitoring(client: CodexAppServerClient) {
         stopMonitoring()
+        resolvedServerRequestIDsByThreadID.removeAll()
+        resolvedServerRequestIDsWithUnknownThread.removeAll()
         userInputRequestIDsBeingResolved.removeAll()
 
         notificationMonitoringTask = Task { [weak self] in
@@ -303,7 +313,7 @@ actor CodexAgentTaskStore {
         serverRequest: CodexAppServerRequest,
         autoResolutionClient: CodexAppServerClient? = nil
     ) {
-        guard !resolvedServerRequestIDs.contains(serverRequest.id),
+        guard !isServerRequestResolved(serverRequest.id),
               !userInputRequestIDsBeingResolved.contains(serverRequest.id) else {
             return
         }
@@ -423,11 +433,12 @@ actor CodexAgentTaskStore {
     }
 
     func resolveApproval(requestID: CodexAppServerRequestID) {
-        resolvedServerRequestIDs.insert(requestID)
-        guard let threadID = taskStatesByThreadID.first(where: { _, taskState in
+        let threadID = taskStatesByThreadID.first(where: { _, taskState in
             taskState.approvalsByRequestID[requestID] != nil
-        })?.key,
-        var taskState = taskStatesByThreadID[threadID] else {
+        })?.key
+        markServerRequestResolved(requestID: requestID, threadID: threadID)
+        guard let threadID,
+              var taskState = taskStatesByThreadID[threadID] else {
             return
         }
 
@@ -445,11 +456,12 @@ actor CodexAgentTaskStore {
     func resolveUserInput(requestID: CodexAppServerRequestID) {
         cancelAutomaticUserInputResolution(requestID: requestID)
         userInputRequestIDsBeingResolved.remove(requestID)
-        resolvedServerRequestIDs.insert(requestID)
-        guard let threadID = taskStatesByThreadID.first(where: { _, taskState in
+        let threadID = taskStatesByThreadID.first(where: { _, taskState in
             taskState.userInputsByRequestID[requestID] != nil
-        })?.key,
-        var taskState = taskStatesByThreadID[threadID] else {
+        })?.key
+        markServerRequestResolved(requestID: requestID, threadID: threadID)
+        guard let threadID,
+              var taskState = taskStatesByThreadID[threadID] else {
             return
         }
 
@@ -475,7 +487,7 @@ actor CodexAgentTaskStore {
     ) -> Bool {
         cancelAutomaticUserInputResolution(requestID: requestID)
         guard isUserInputRequestPending(requestID: requestID),
-              !resolvedServerRequestIDs.contains(requestID),
+              !isServerRequestResolved(requestID),
               userInputRequestIDsBeingResolved.insert(requestID).inserted else {
             return false
         }
@@ -484,6 +496,27 @@ actor CodexAgentTaskStore {
 
     func abandonUserInputResolution(requestID: CodexAppServerRequestID) {
         userInputRequestIDsBeingResolved.remove(requestID)
+    }
+
+    private func markServerRequestResolved(
+        requestID: CodexAppServerRequestID,
+        threadID: String?
+    ) {
+        if let threadID {
+            resolvedServerRequestIDsByThreadID[threadID, default: []]
+                .insert(requestID)
+        } else {
+            resolvedServerRequestIDsWithUnknownThread.insert(requestID)
+        }
+    }
+
+    private func isServerRequestResolved(
+        _ requestID: CodexAppServerRequestID
+    ) -> Bool {
+        resolvedServerRequestIDsWithUnknownThread.contains(requestID)
+            || resolvedServerRequestIDsByThreadID.values.contains { resolvedRequestIDs in
+                resolvedRequestIDs.contains(requestID)
+            }
     }
 
     private func scheduleAutomaticUserInputResolution(
@@ -532,7 +565,7 @@ actor CodexAgentTaskStore {
         requestID: CodexAppServerRequestID
     ) -> Bool {
         guard isUserInputRequestPending(requestID: requestID),
-              !resolvedServerRequestIDs.contains(requestID),
+              !isServerRequestResolved(requestID),
               userInputRequestIDsBeingResolved.insert(requestID).inserted else {
             return false
         }
@@ -576,6 +609,9 @@ actor CodexAgentTaskStore {
             requestIDs: removedTaskState.userInputOrder
         )
         userInputRequestIDsBeingResolved.subtract(removedTaskState.userInputOrder)
+        // The server cannot re-deliver requests for a thread that no longer
+        // exists, so its resolved-request dedupe memory goes with it.
+        resolvedServerRequestIDsByThreadID.removeValue(forKey: threadID)
         publishSnapshots()
     }
 
@@ -787,8 +823,12 @@ actor CodexAgentTaskStore {
             }
         case .failed:
             if !taskState.status.isTerminal {
-                resolvedServerRequestIDs.formUnion(taskState.approvalOrder)
-                resolvedServerRequestIDs.formUnion(taskState.userInputOrder)
+                for requestID in taskState.approvalOrder + taskState.userInputOrder {
+                    markServerRequestResolved(
+                        requestID: requestID,
+                        threadID: parameters.threadId
+                    )
+                }
                 taskState.approvalsByRequestID.removeAll()
                 taskState.approvalOrder.removeAll()
                 cancelAutomaticUserInputResolutions(
@@ -817,7 +857,10 @@ actor CodexAgentTaskStore {
             return
         }
 
-        resolvedServerRequestIDs.insert(parameters.requestId)
+        markServerRequestResolved(
+            requestID: parameters.requestId,
+            threadID: parameters.threadId
+        )
         userInputRequestIDsBeingResolved.remove(parameters.requestId)
         cancelAutomaticUserInputResolution(requestID: parameters.requestId)
 
