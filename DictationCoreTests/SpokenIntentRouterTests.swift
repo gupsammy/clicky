@@ -247,6 +247,46 @@ final class SpokenIntentRouterTests: XCTestCase {
         )
     }
 
+    func testContractedHardNoAgentRequestStaysWithCompanion() {
+        XCTAssertEqual(
+            SpokenIntentRouter.route(
+                "Don't start an agent — run the tests and prepare a PR yourself."
+            ),
+            .companion
+        )
+        XCTAssertEqual(
+            SpokenIntentRouter.route("Don't use an agent, just explain this."),
+            .companion
+        )
+    }
+
+    func testHighConfidenceNewWorkOutranksSelectedAndSoleRunningFollowUpContext() {
+        XCTAssertEqual(
+            SpokenIntentRouter.route(
+                "Make a website about the research.",
+                agentConversationContext: .selected
+            ),
+            .agent(prompt: "Make a website about the research.")
+        )
+        XCTAssertEqual(
+            SpokenIntentRouter.route(
+                "Make a website about the research.",
+                agentConversationContext: .soleRunning
+            ),
+            .agent(prompt: "Make a website about the research.")
+        )
+    }
+
+    func testTellAgentWakePhraseRoutesFollowUp() {
+        XCTAssertEqual(
+            SpokenIntentRouter.route(
+                "Hey Clicky, tell agent: only touch the parser",
+                agentConversationContext: .selected
+            ),
+            .agentFollowUp(prompt: "only touch the parser")
+        )
+    }
+
     func testKeepsQuestionsAndFocusedWritingOutOfAutomaticAgentLane() {
         XCTAssertEqual(
             SpokenIntentRouter.route("What does this error mean?"),

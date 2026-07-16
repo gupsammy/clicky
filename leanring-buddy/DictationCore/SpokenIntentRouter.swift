@@ -68,9 +68,13 @@ public enum SpokenIntentRouter {
         }
         if isAgentStatusQuery(trimmedTranscript) { return .agentStatus }
 
-        if agentConversationContext != .ambiguous,
-           agentConversationContext.hasPotentialFollowUpTarget,
-           isLikelyAgentFollowUp(trimmedTranscript) {
+        // High-confidence NEW work must win over follow-up steering in every
+        // context, not just .ambiguous: an unrelated multi-step request
+        // spoken while some task happens to be open would otherwise be
+        // silently steered into the wrong existing thread.
+        if agentConversationContext.hasPotentialFollowUpTarget,
+           isLikelyAgentFollowUp(trimmedTranscript),
+           !isHighConfidenceAgentTask(trimmedTranscript) {
             return .agentFollowUp(prompt: trimmedTranscript)
         }
 
@@ -80,11 +84,6 @@ public enum SpokenIntentRouter {
 
         if isHighConfidenceAgentTask(trimmedTranscript) {
             return .agent(prompt: trimmedTranscript)
-        }
-
-        if agentConversationContext == .ambiguous,
-           isLikelyAgentFollowUp(trimmedTranscript) {
-            return .agentFollowUp(prompt: trimmedTranscript)
         }
 
         return hasScreenAwareDestination ? .screenAwareComposition : .companion
@@ -162,13 +161,17 @@ public enum SpokenIntentRouter {
         "app"
     ]
 
+    // Prefixes are matched against normalizedWords(in:) output, so each one
+    // is normalized the same way; the trailing space is re-appended after
+    // normalizing because it is the word boundary that stops a prefix like
+    // "make " from matching a longer word like "makeshift".
     private static let directFollowUpPrefixes = [
         "also ",
         "do not ",
         "don't ",
         "instead ",
         "only "
-    ]
+    ].map { normalizedWords(in: $0) + " " }
 
     private static let continuedActionPrefixes = [
         "now add ",
@@ -179,7 +182,7 @@ public enum SpokenIntentRouter {
         "now run ",
         "now test ",
         "now update "
-    ]
+    ].map { normalizedWords(in: $0) + " " }
 
     private static let refinementActionPrefixes = [
         "add ",
@@ -198,14 +201,18 @@ public enum SpokenIntentRouter {
         "could you change ",
         "could you make ",
         "could you remove "
-    ]
+    ].map { normalizedWords(in: $0) + " " }
 
+    // These are matched against normalizedWords(in:) output, which strips
+    // punctuation, so the phrases must be normalized the same way — otherwise
+    // contracted forms like "don't" (normalized to "don t") can never match
+    // and the hard no-agent guard is silently dead for them.
     private static let hardNoAgentPhrases = [
         "do not start an agent",
         "don't start an agent",
         "do not use an agent",
         "don't use an agent"
-    ]
+    ].map { normalizedWords(in: $0) }
 
     private static let softNoAgentPhrases = [
         "just explain"
@@ -290,7 +297,7 @@ public enum SpokenIntentRouter {
     }
 
     private static func isLikelyAgentFollowUp(_ transcript: String) -> Bool {
-        let normalizedTranscript = transcript.lowercased()
+        let normalizedTranscript = normalizedWords(in: transcript)
         return directFollowUpPrefixes.contains {
             normalizedTranscript.hasPrefix($0)
         } || continuedActionPrefixes.contains {
