@@ -143,15 +143,18 @@ public enum SpokenIntentRouter {
         "ask",
         "audit",
         "build",
+        "check",
         "clean",
         "create",
         "debug",
         "do",
         "edit",
+        "find",
         "fix",
         "implement",
         "inspect",
         "investigate",
+        "look",
         "make",
         "prepare",
         "read",
@@ -164,6 +167,16 @@ public enum SpokenIntentRouter {
         "transcribe",
         "update",
         "write"
+    ]
+
+    private static let explicitAgentRequestPrefixes = [
+        "please can you ",
+        "please could you ",
+        "please would you ",
+        "can you ",
+        "could you ",
+        "please ",
+        "would you "
     ]
 
     private static let agentScopeWords = [
@@ -359,8 +372,16 @@ public enum SpokenIntentRouter {
         }
 
         let normalizedPrompt = normalizedWords(in: prompt)
+        let normalizedCommand = explicitAgentRequestPrefixes.reduce(
+            normalizedPrompt
+        ) { currentCommand, requestPrefix in
+            guard currentCommand.hasPrefix(requestPrefix) else {
+                return currentCommand
+            }
+            return String(currentCommand.dropFirst(requestPrefix.count))
+        }
         guard explicitAgentCommandVerbs.contains(where: {
-            normalizedPrompt == $0 || normalizedPrompt.hasPrefix($0 + " ")
+            normalizedCommand == $0 || normalizedCommand.hasPrefix($0 + " ")
         }) else {
             return nil
         }

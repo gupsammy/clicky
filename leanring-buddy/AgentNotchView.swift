@@ -76,6 +76,9 @@ struct AgentNotchView: View {
         .buttonStyle(.plain)
         .pointerCursor()
         .help("Open Clicky agents")
+        .accessibilityLabel(collapsedTitle)
+        .accessibilityValue(collapsedAccessibilityValue)
+        .accessibilityHint("Open Clicky agents")
     }
 
     private var expandedSurface: some View {
@@ -112,6 +115,7 @@ struct AgentNotchView: View {
                 Label("Home", systemImage: "house")
             }
             .buttonStyle(AgentNotchNavigationButtonStyle(isSelected: false))
+            .accessibilityLabel("Home")
 
             Button {
                 presentationModel.showOverview()
@@ -119,6 +123,8 @@ struct AgentNotchView: View {
                 Label("Agents", systemImage: "sparkles")
             }
             .buttonStyle(AgentNotchNavigationButtonStyle(isSelected: true))
+            .accessibilityLabel("Agents")
+            .accessibilityAddTraits(.isSelected)
 
             Spacer()
 
@@ -136,6 +142,8 @@ struct AgentNotchView: View {
             .background(Circle().fill(DS.Colors.surface2))
             .pointerCursor()
             .help("Choose Agent Folder")
+            .accessibilityLabel("Choose Agent Folder")
+            .accessibilityValue(workspaceAccessibilityValue)
 
             Button {
                 presentationModel.collapseNotch()
@@ -153,6 +161,7 @@ struct AgentNotchView: View {
             .background(Circle().fill(DS.Colors.surface2))
             .pointerCursor()
             .help("Open Clicky Settings")
+            .accessibilityLabel("Open Clicky Settings")
 
             Button {
                 presentationModel.collapseNotch()
@@ -165,6 +174,7 @@ struct AgentNotchView: View {
             .foregroundColor(DS.Colors.textTertiary)
             .pointerCursor()
             .help("Collapse")
+            .accessibilityLabel("Collapse Clicky agents")
         }
         .padding(.horizontal, 24)
         .frame(height: 54)
@@ -180,6 +190,9 @@ struct AgentNotchView: View {
                 .foregroundColor(DS.Colors.textTertiary)
                 .lineLimit(1)
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Codex connection")
+        .accessibilityValue(connectionTitle)
     }
 
     private var overview: some View {
@@ -355,6 +368,8 @@ struct AgentNotchView: View {
                 }
                 .buttonStyle(.plain)
                 .pointerCursor()
+                .accessibilityLabel("Choose Agent Folder")
+                .accessibilityValue(workspaceAccessibilityValue)
             }
 
             HStack(alignment: .bottom, spacing: 10) {
@@ -368,6 +383,7 @@ struct AgentNotchView: View {
                 .foregroundColor(DS.Colors.textPrimary)
                 .lineLimit(1...4)
                 .onSubmit(presentationModel.startTask)
+                .accessibilityLabel("New agent task")
 
                 Button(action: presentationModel.startTask) {
                     Group {
@@ -387,6 +403,8 @@ struct AgentNotchView: View {
                 .disabled(!presentationModel.canRunTask)
                 .opacity(presentationModel.canRunTask ? 1 : 0.42)
                 .help("Run agent")
+                .accessibilityLabel("Run agent")
+                .accessibilityHint("Starts a Codex agent in the selected Agent Folder")
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 11)
@@ -429,6 +447,22 @@ struct AgentNotchView: View {
         if runningCount == 0 { return "Agents" }
         if runningCount == 1 { return presentationModel.runningTasks[0].title }
         return "\(runningCount) agents working"
+    }
+
+    private var collapsedAccessibilityValue: String {
+        guard let primaryTask = presentationModel.runningTasks.first else {
+            return "No agents are running"
+        }
+        if presentationModel.runningTasks.count == 1 {
+            return "\(primaryTask.status.displayTitle). \(primaryTask.compactSummary)"
+        }
+        return "\(presentationModel.runningTasks.count) agents are running"
+    }
+
+    private var workspaceAccessibilityValue: String {
+        presentationModel.workspacePath.map {
+            URL(fileURLWithPath: $0).lastPathComponent
+        } ?? "No folder selected"
     }
 
     private var connectionTitle: String {
@@ -547,6 +581,7 @@ private struct AgentHUDErrorBanner: View {
             .foregroundColor(DS.Colors.textTertiary)
             .pointerCursor()
             .help("Dismiss error")
+            .accessibilityLabel("Dismiss error")
         }
         .padding(12)
         .background(
