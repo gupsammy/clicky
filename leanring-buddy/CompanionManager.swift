@@ -523,6 +523,11 @@ final class CompanionManager: ObservableObject {
             // Don't register push-to-talk while the onboarding video is playing
             guard !showOnboardingVideo else { return }
 
+            // This eligibility probe is intentionally repeated inside
+            // composeAndInsertScreenAwareText once the transcript is final:
+            // re-reading the field at composition time is what makes the
+            // stale-value check before insertion meaningful. Do not cache
+            // this probe's context for reuse there.
             if openAIScreenCompositionClient.isConfigured,
                let focusContext = try? focusedTextInsertionService.captureFocusContext(),
                (try? focusedTextInsertionService.screenAwareContext(for: focusContext)) != nil {
@@ -726,7 +731,8 @@ final class CompanionManager: ObservableObject {
         currentResponseTask?.cancel()
         elevenLabsTTSClient.stopPlayback()
 
-        currentResponseTask = Task {
+        currentResponseTask = Task { [weak self] in
+            guard let self else { return }
             voiceState = .processing
 
             do {

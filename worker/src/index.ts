@@ -138,6 +138,18 @@ async function authorizeWorkerRoute(
     return jsonResponse({ error: "Worker authorization is not configured." }, 503);
   }
 
+  // Rate-limit by caller IP before the token check so requests with a
+  // missing or wrong bearer token cannot hammer the Worker unbounded — the
+  // per-token limiter below only ever sees authenticated traffic.
+  const callerIPAddress =
+    request.headers.get("cf-connecting-ip") ?? "unknown-caller-ip";
+  const callerRateLimitResult = await rateLimiter.limit({
+    key: `caller-ip:${callerIPAddress}`,
+  });
+  if (!callerRateLimitResult.success) {
+    return jsonResponse({ error: "Rate limit exceeded." }, 429);
+  }
+
   const authorizationHeader = request.headers.get("authorization") ?? "";
   const expectedAuthorizationHeader = `Bearer ${configuredAccessToken}`;
   if (!constantTimeEqual(authorizationHeader, expectedAuthorizationHeader)) {

@@ -56,6 +56,17 @@ final class OpenAIScreenCompositionClient {
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+            // The Worker returns a JSON { error } body (e.g. "Rate limit
+            // exceeded.") that is more actionable than the bare status code.
+            let workerErrorMessage = (try? JSONDecoder().decode(
+                WorkerErrorResponseBody.self,
+                from: responseData
+            ))?.error
+            if let workerErrorMessage {
+                throw OpenAIScreenCompositionClientError(
+                    message: "Screen-aware composition failed with HTTP \(statusCode): \(workerErrorMessage)"
+                )
+            }
             throw OpenAIScreenCompositionClientError(
                 message: "Screen-aware composition failed with HTTP \(statusCode)."
             )
@@ -81,4 +92,8 @@ final class OpenAIScreenCompositionClient {
 
         return workerBaseURL.appendingPathComponent("openai-screen-compose")
     }
+}
+
+private struct WorkerErrorResponseBody: Decodable {
+    let error: String
 }

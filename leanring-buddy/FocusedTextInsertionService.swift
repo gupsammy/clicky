@@ -243,13 +243,18 @@ final class FocusedTextInsertionService {
             )
         }
 
-        let selectedText = currentValue.substring(with: selectedRange)
-        let textBeforeSelection = currentValue.substring(
-            with: NSRange(location: 0, length: selectedRange.location)
-        )
         let selectionEndLocation = selectedRange.location + selectedRange.length
-        let textAfterSelection = currentValue.substring(
-            with: NSRange(
+        let selectedText = boundedSubstringKeepingEnd(
+            of: currentValue,
+            in: selectedRange
+        )
+        let textBeforeSelection = boundedSubstringKeepingEnd(
+            of: currentValue,
+            in: NSRange(location: 0, length: selectedRange.location)
+        )
+        let textAfterSelection = boundedSubstringKeepingStart(
+            of: currentValue,
+            in: NSRange(
                 location: selectionEndLocation,
                 length: currentValue.length - selectionEndLocation
             )
@@ -260,9 +265,9 @@ final class FocusedTextInsertionService {
                 processIdentifier: focusContext.applicationProcessIdentifier
             )?.localizedName,
             windowTitle: focusedWindowTitle(for: focusContext.focusedElement),
-            selectedText: boundedSuffix(selectedText),
-            textBeforeSelection: boundedSuffix(textBeforeSelection),
-            textAfterSelection: boundedPrefix(textAfterSelection),
+            selectedText: selectedText,
+            textBeforeSelection: textBeforeSelection,
+            textAfterSelection: textAfterSelection,
             focusedElementFrameInCoreGraphicsCoordinates: focusedElementFrame(
                 for: focusContext.focusedElement
             ),
@@ -452,14 +457,69 @@ final class FocusedTextInsertionService {
         return CGRect(origin: position, size: size)
     }
 
-    private func boundedPrefix(_ value: String) -> String? {
-        guard !value.isEmpty else { return nil }
-        return String(value.prefix(maximumScreenAwareContextCharacterCount))
+    // The focused element's AX value can be an entire multi-megabyte document,
+    // and screenAwareContext(for:) runs on the push-to-talk key-down path.
+    // Clamping the range to the UTF-16 budget BEFORE calling substring(with:)
+    // keeps each copy bounded instead of materializing the whole document and
+    // then truncating it.
+    private func boundedSubstringKeepingEnd(
+        of value: NSString,
+        in range: NSRange
+    ) -> String? {
+        guard range.length > 0 else { return nil }
+
+        var clampedRange = range
+        if range.length > maximumScreenAwareContextCharacterCount {
+            let budgetCutLocation = range.location + range.length
+                - maximumScreenAwareContextCharacterCount
+            // Snap the cut forward to the next composed character boundary so
+            // a surrogate pair or emoji cluster is never split at the edge.
+            let composedSequenceAtCut = value.rangeOfComposedCharacterSequence(
+                at: budgetCutLocation
+            )
+            let snappedCutLocation = composedSequenceAtCut.location == budgetCutLocation
+                ? budgetCutLocation
+                : min(
+                    composedSequenceAtCut.location + composedSequenceAtCut.length,
+                    range.location + range.length
+                )
+            clampedRange = NSRange(
+                location: snappedCutLocation,
+                length: range.location + range.length - snappedCutLocation
+            )
+        }
+
+        let boundedValue = value.substring(with: clampedRange)
+        return boundedValue.isEmpty ? nil : boundedValue
     }
 
-    private func boundedSuffix(_ value: String) -> String? {
-        guard !value.isEmpty else { return nil }
-        return String(value.suffix(maximumScreenAwareContextCharacterCount))
+    private func boundedSubstringKeepingStart(
+        of value: NSString,
+        in range: NSRange
+    ) -> String? {
+        guard range.length > 0 else { return nil }
+
+        var clampedRange = range
+        if range.length > maximumScreenAwareContextCharacterCount {
+            let budgetCutLocation = range.location
+                + maximumScreenAwareContextCharacterCount
+            // Snap the cut back to the start of the composed character it
+            // lands inside so a surrogate pair or emoji cluster is never split.
+            let composedSequenceAtCut = value.rangeOfComposedCharacterSequence(
+                at: budgetCutLocation
+            )
+            let snappedCutLocation = max(
+                composedSequenceAtCut.location,
+                range.location
+            )
+            clampedRange = NSRange(
+                location: range.location,
+                length: snappedCutLocation - range.location
+            )
+        }
+
+        let boundedValue = value.substring(with: clampedRange)
+        return boundedValue.isEmpty ? nil : boundedValue
     }
 
     private func applyInsertionPlan(
