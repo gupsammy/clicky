@@ -856,11 +856,12 @@ final class CodexAppServerCoreTests: XCTestCase {
             in: workspace
         )
 
-        XCTAssertEqual(
-            Array(transport.sentMethods.suffix(2)),
-            ["thread/resume", "turn/start"]
-        )
-        XCTAssertFalse(transport.sentMethods.contains("turn/steer"))
+        let sentMethods = transport.sentMethods
+        let resumeIndex = try XCTUnwrap(sentMethods.firstIndex(of: "thread/resume"))
+        let turnStartIndex = try XCTUnwrap(sentMethods.lastIndex(of: "turn/start"))
+        XCTAssertLessThan(resumeIndex, turnStartIndex)
+        XCTAssertEqual(sentMethods.filter { $0 == "thread/read" }.count, 2)
+        XCTAssertFalse(sentMethods.contains("turn/steer"))
     }
 
     private func makeClient(
@@ -1132,6 +1133,27 @@ private final class MockCodexAppServerTransport: CodexAppServerTransport, @unche
             let response = CodexAppServerOutgoingResponse(
                 id: requestID,
                 result: CodexAppServerCancelLoginResponse(status: .canceled)
+            )
+            currentMessageHandler?(try JSONEncoder().encode(response))
+        case "thread/read":
+            let response = CodexAppServerOutgoingResponse(
+                id: requestID,
+                result: CodexThreadReadResponse(
+                    thread: CodexThread(
+                        id: "thread_completed",
+                        sessionId: "session_completed",
+                        preview: "Completed task",
+                        name: nil,
+                        cwd: "/tmp",
+                        modelProvider: "openai",
+                        cliVersion: "0.144.2",
+                        createdAt: 1,
+                        updatedAt: 2,
+                        ephemeral: false,
+                        status: CodexThreadStatus(type: "idle", activeFlags: nil),
+                        turns: []
+                    )
+                )
             )
             currentMessageHandler?(try JSONEncoder().encode(response))
         case "thread/resume":
