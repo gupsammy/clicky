@@ -71,6 +71,11 @@ jobs:
               already at pr-review-diff.patch in the repository root — Read it (in
               chunks if large). Do NOT run gh pr diff, git fetch, or redirect output to
               files; those are unavailable. Read source files directly from the checkout.
+              Work strictly inline and synchronously: never launch subagents, background
+              tasks, or scheduled wakeups — this run terminates the moment your main
+              turn ends, so any work you delegate or defer is silently lost. However
+              large the diff, read it chunk by chunk yourself and write the review
+              before you finish.
             - pull_request-triggered run: run `gh pr diff` as usual.
 
             ## Phase 2 — Change Comprehension
