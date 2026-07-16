@@ -116,6 +116,21 @@ jobs:
             --model sonnet
             --allowedTools "Read,Write,Glob,Grep,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),mcp__github_inline_comment__create_inline_comment"
 
+      # Surfaces what Claude actually did (tool calls, denials, errors) — the
+      # streamed log only shows init/result, which makes silent failures undebuggable
+      - name: Debug — dump Claude tool activity (manual dispatch only)
+        if: ${{ always() && github.event_name == 'workflow_dispatch' }}
+        run: |
+          f=/home/runner/work/_temp/claude-execution-output.json
+          if [ -f "$f" ]; then
+            echo "--- tool calls ---"
+            jq -r '.[] | select(.type == "assistant") | .message.content[]? | select(.type == "tool_use") | "\(.name): \((.input.command // .input.file_path // .input.pattern // "") | tostring | .[0:150])"' "$f" | head -60
+            echo "--- errored tool results ---"
+            jq -r '.[] | select(.type == "user") | .message.content[]? | select(.type == "tool_result" and .is_error == true) | (.content | tostring | .[0:250])' "$f" | head -40
+          else
+            echo "no execution output found at $f"
+          fi
+
       # Posting is deterministic on dispatch runs: Claude writes review-output.md,
       # this step posts it. Fails loudly if the review never materialized so a
       # silent no-op run can't show green.
