@@ -43,6 +43,10 @@ final class CompanionManager: ObservableObject {
     /// Custom speech bubble text for the pointing animation. When set,
     /// BlueCursorView uses this instead of a random pointer phrase.
     @Published var detectedElementBubbleText: String?
+    @Published private(set) var spatialAnnotations: [CompanionSpatialAnnotation] = []
+    @Published private(set) var spatialAnnotationSceneGeneration = 0
+    private var spatialAnnotationDismissTask: Task<Void, Never>?
+    private var spatialContextGeneration = 0
 
     // MARK: - Onboarding Video State (shared across all screen overlays)
 
@@ -98,6 +102,8 @@ final class CompanionManager: ObservableObject {
     private var voiceStateCancellable: AnyCancellable?
     private var audioPowerCancellable: AnyCancellable?
     private var screenParametersCancellable: AnyCancellable?
+    private var activeSpaceCancellable: AnyCancellable?
+    private var frontmostApplicationCancellable: AnyCancellable?
     private var accessibilityCheckTimer: Timer?
     private var pendingKeyboardShortcutStartTask: Task<Void, Never>?
     private var activeFastDictationFocusContext: DictationFocusContext?
@@ -207,6 +213,7 @@ final class CompanionManager: ObservableObject {
         bindAudioPowerLevel()
         bindShortcutTransitions()
         bindScreenParameterChanges()
+        bindSpatialContextChanges()
         // Eagerly touch the Claude API so its TLS warmup handshake completes
         // well before the onboarding demo fires at ~40s into the video.
         _ = claudeAPI
@@ -315,6 +322,13 @@ final class CompanionManager: ObservableObject {
         detectedElementBubbleText = nil
     }
 
+    func clearSpatialAnnotations() {
+        spatialAnnotationDismissTask?.cancel()
+        spatialAnnotationDismissTask = nil
+        spatialAnnotations = []
+        spatialAnnotationSceneGeneration &+= 1
+    }
+
     func stop() {
         globalPushToTalkShortcutMonitor.stop()
         buddyDictationManager.cancelCurrentDictation()
@@ -331,6 +345,7 @@ final class CompanionManager: ObservableObject {
         transientHideTask?.cancel()
         transientHideTask = nil
         clearDetectedElementLocation()
+        clearSpatialAnnotations()
 
         currentResponseTask?.cancel()
         currentResponseTask = nil
@@ -340,6 +355,10 @@ final class CompanionManager: ObservableObject {
         audioPowerCancellable?.cancel()
         screenParametersCancellable?.cancel()
         screenParametersCancellable = nil
+        activeSpaceCancellable?.cancel()
+        activeSpaceCancellable = nil
+        frontmostApplicationCancellable?.cancel()
+        frontmostApplicationCancellable = nil
         accessibilityCheckTimer?.invalidate()
         accessibilityCheckTimer = nil
     }
@@ -486,13 +505,40 @@ final class CompanionManager: ObservableObject {
             .publisher(for: NSApplication.didChangeScreenParametersNotification)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                guard let self, self.isOverlayVisible else { return }
+                guard let self else { return }
+                self.spatialContextGeneration &+= 1
                 self.clearDetectedElementLocation()
+                self.clearSpatialAnnotations()
+                guard self.isOverlayVisible else { return }
                 self.overlayWindowManager.showOverlay(
                     onScreens: NSScreen.screens,
                     companionManager: self
                 )
             }
+    }
+
+    private func bindSpatialContextChanges() {
+        activeSpaceCancellable?.cancel()
+        activeSpaceCancellable = NSWorkspace.shared.notificationCenter
+            .publisher(for: NSWorkspace.activeSpaceDidChangeNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.invalidateSpatialContext()
+            }
+
+        frontmostApplicationCancellable?.cancel()
+        frontmostApplicationCancellable = NSWorkspace.shared.notificationCenter
+            .publisher(for: NSWorkspace.didActivateApplicationNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.invalidateSpatialContext()
+            }
+    }
+
+    private func invalidateSpatialContext() {
+        spatialContextGeneration &+= 1
+        clearDetectedElementLocation()
+        clearSpatialAnnotations()
     }
 
     private func bindVoiceStateObservation() {
@@ -590,6 +636,7 @@ final class CompanionManager: ObservableObject {
             elevenLabsTTSClient.stopPlayback()
             systemSpeechSynthesizer.stopSpeaking()
             clearDetectedElementLocation()
+            clearSpatialAnnotations()
 
             // Dismiss the onboarding prompt if it's showing
             if showOnboardingPrompt {
@@ -695,6 +742,7 @@ final class CompanionManager: ObservableObject {
         elevenLabsTTSClient.stopPlayback()
         systemSpeechSynthesizer.stopSpeaking()
         clearDetectedElementLocation()
+        clearSpatialAnnotations()
         agentPresentationModel.startSpokenTask(prompt: prompt)
         voiceState = .idle
         scheduleTransientHideIfNeeded()
@@ -705,6 +753,7 @@ final class CompanionManager: ObservableObject {
         elevenLabsTTSClient.stopPlayback()
         systemSpeechSynthesizer.stopSpeaking()
         clearDetectedElementLocation()
+        clearSpatialAnnotations()
         agentPresentationModel.sendSpokenFollowUp(prompt: prompt)
         voiceState = .idle
         scheduleTransientHideIfNeeded()
@@ -715,6 +764,7 @@ final class CompanionManager: ObservableObject {
         elevenLabsTTSClient.stopPlayback()
         systemSpeechSynthesizer.stopSpeaking()
         clearDetectedElementLocation()
+        clearSpatialAnnotations()
         agentPresentationModel.showOverview()
 
         currentResponseGeneration &+= 1
@@ -934,14 +984,24 @@ final class CompanionManager: ObservableObject {
     - instead, when it fits naturally, end by planting a seed — mention something bigger or more ambitious they could try, a related concept that goes deeper, or a next-level technique that builds on what you just explained. make it something worth coming back for, not a question they'd just nod to. it's okay to not end with anything extra if the answer is complete on its own.
     - if you receive multiple screen images, the one labeled "primary focus" is where the cursor is — prioritize that one but reference others if relevant.
 
-    element pointing:
-    you have a small blue triangle cursor that can fly to and point at things on screen. use it whenever pointing would genuinely help the user — if they're asking how to do something, looking for a menu, trying to find a button, or need help navigating an app, point at the relevant element. err on the side of pointing rather than not pointing, because it makes your help way more useful and concrete.
+    spatial teaching:
+    you can point with a small blue cursor and draw coral highlights, lines, arrows, circles, curves, and polygons over the user's screen. use the smallest visual set that materially clarifies the answer. preserve the order you want the visuals revealed in.
 
     don't point at things when it would be pointless — like if the user asks a general knowledge question, or the conversation has nothing to do with what's on screen, or you'd just be pointing at something obvious they're already looking at. but if there's a specific UI element, menu, button, or area on screen that's relevant to what you're helping with, point at it.
 
-    when you point, append a coordinate tag at the very end of your response, AFTER your spoken text. the screenshot images are labeled with their pixel dimensions. use those dimensions as the coordinate space. the origin (0,0) is the top-left corner of the image. x increases rightward, y increases downward.
+    append visual tags after all spoken text. the screenshot images are labeled with their pixel dimensions. use those dimensions as the coordinate space. the origin (0,0) is the top-left corner. x increases rightward and y increases downward. every coordinate must remain inside its screenshot.
 
     format: [POINT:x,y:label] where x,y are integer pixel coordinates in the screenshot's coordinate space, and label is a short 1-3 word description of the element (like "search bar" or "save button"). if the element is on the cursor's screen you can omit the screen number. if the element is on a DIFFERENT screen, append :screenN where N is the screen number from the image label (e.g. :screen2). this is important — without the screen number, the cursor will point at the wrong place.
+
+    additional formats:
+    - [HIGHLIGHT:x,y,width,height:label:screenN]
+    - [SHAPE:line:x1,y1;x2,y2:label:screenN]
+    - [SHAPE:arrow:x1,y1;x2,y2:label:screenN]
+    - [SHAPE:circle:left,top;right,bottom:label:screenN]
+    - [SHAPE:curve:x1,y1;controlX,controlY;x2,y2:label:screenN]
+    - [SHAPE:polygon:x1,y1;x2,y2;x3,y3:label:screenN]
+
+    omit :screenN only for the image labeled primary focus. keep labels under four words and never put a closing bracket inside a label. use at most twelve visuals.
 
     if pointing wouldn't help, append [POINT:none].
 
@@ -964,6 +1024,7 @@ final class CompanionManager: ObservableObject {
         elevenLabsTTSClient.stopPlayback()
         currentResponseGeneration &+= 1
         let responseGeneration = currentResponseGeneration
+        let responseSpatialContextGeneration = spatialContextGeneration
 
         currentResponseTask = Task {
             defer { finishResponseTask(responseGeneration: responseGeneration) }
@@ -1001,30 +1062,70 @@ final class CompanionManager: ObservableObject {
 
                 guard !Task.isCancelled else { return }
 
-                // Parse the [POINT:...] tag from Claude's response
+                let spatialParseResult = SpatialAnnotationParser.parse(fullResponseText)
                 let parseResult = Self.parsePointingCoordinates(from: fullResponseText)
                 let spokenText = parseResult.spokenText
 
-                // Handle element pointing if Claude returned coordinates.
-                // Switch to idle BEFORE setting the location so the triangle
-                // becomes visible and can fly to the target. Without this, the
-                // spinner hides the triangle and the flight animation is invisible.
-                let hasPointCoordinate = parseResult.coordinate != nil
-                if hasPointCoordinate {
-                    voiceState = .idle
+                // Re-densify sequence numbers while filtering: POINT tags (rendered
+                // by the cursor flight, not the Canvas) and annotations that fail
+                // screen/geometry resolution would otherwise leave gaps that the
+                // reveal timeline burns ~180ms ticks skipping past.
+                var resolvedSpatialAnnotations: [CompanionSpatialAnnotation] = []
+                for annotation in spatialParseResult.annotations {
+                    if case .point = annotation.kind { continue }
+                    let targetCapture = Self.resolveScreenCapture(
+                        requestedScreenNumber: annotation.screenNumber,
+                        screenCaptures: screenCaptures
+                    )
+                    guard let targetCapture else { continue }
+                    let companionSpatialAnnotation = CompanionSpatialAnnotation(
+                        annotation: annotation,
+                        screenCapture: targetCapture,
+                        sequenceNumber: resolvedSpatialAnnotations.count + 1
+                    )
+                    guard let companionSpatialAnnotation else { continue }
+                    resolvedSpatialAnnotations.append(companionSpatialAnnotation)
                 }
+                let responseSpatialContextIsCurrent = spatialContextGeneration
+                    == responseSpatialContextGeneration
 
                 // Pick the screen capture matching Claude's screen number,
                 // falling back to the cursor screen if not specified.
                 let targetScreenCapture: CompanionScreenCapture? = {
-                    if let screenNumber = parseResult.screenNumber,
-                       screenNumber >= 1 && screenNumber <= screenCaptures.count {
-                        return screenCaptures[screenNumber - 1]
-                    }
-                    return screenCaptures.first(where: { $0.isCursorScreen })
+                    Self.resolveScreenCapture(
+                        requestedScreenNumber: parseResult.screenNumber,
+                        screenCaptures: screenCaptures
+                    )
                 }()
 
-                if let pointCoordinate = parseResult.coordinate,
+                // Vision-model coordinates can land a few pixels past a screenshot
+                // edge for elements near the border. Clamp the single cursor-flight
+                // point instead of dropping the whole interaction (matching the
+                // onboarding demo path); HIGHLIGHT/SHAPE geometry stays strictly
+                // bounds-checked in SpatialAnnotationDisplayGeometry because a
+                // clamped shape would silently distort.
+                let clampedPointCoordinate: CGPoint? = {
+                    guard responseSpatialContextIsCurrent,
+                          let pointCoordinate = parseResult.coordinate,
+                          let targetScreenCapture else {
+                        return nil
+                    }
+                    let screenshotWidth = CGFloat(targetScreenCapture.screenshotWidthInPixels)
+                    let screenshotHeight = CGFloat(targetScreenCapture.screenshotHeightInPixels)
+                    return CGPoint(
+                        x: max(0, min(pointCoordinate.x, screenshotWidth)),
+                        y: max(0, min(pointCoordinate.y, screenshotHeight))
+                    )
+                }()
+
+                // Switch to idle BEFORE setting a valid location so the triangle
+                // becomes visible and can fly to the target. Invalid or stale
+                // coordinates leave the processing state intact for TTS startup.
+                if clampedPointCoordinate != nil {
+                    voiceState = .idle
+                }
+
+                if let pointCoordinate = clampedPointCoordinate,
                    let targetScreenCapture {
                     // Claude's coordinates are in the screenshot's pixel space
                     // (top-left origin, e.g. 1280x831). Scale to the display's
@@ -1035,13 +1136,9 @@ final class CompanionManager: ObservableObject {
                     let displayHeight = CGFloat(targetScreenCapture.displayHeightInPoints)
                     let displayFrame = targetScreenCapture.displayFrame
 
-                    // Clamp to screenshot coordinate space
-                    let clampedX = max(0, min(pointCoordinate.x, screenshotWidth))
-                    let clampedY = max(0, min(pointCoordinate.y, screenshotHeight))
-
                     // Scale from screenshot pixels to display points
-                    let displayLocalX = clampedX * (displayWidth / screenshotWidth)
-                    let displayLocalY = clampedY * (displayHeight / screenshotHeight)
+                    let displayLocalX = pointCoordinate.x * (displayWidth / screenshotWidth)
+                    let displayLocalY = pointCoordinate.y * (displayHeight / screenshotHeight)
 
                     // Convert from top-left origin (screenshot) to bottom-left origin (AppKit)
                     let appKitY = displayHeight - displayLocalY
@@ -1083,12 +1180,26 @@ final class CompanionManager: ObservableObject {
                         try await elevenLabsTTSClient.speakText(spokenText)
                         // speakText returns after player.play() — audio is now playing
                         voiceState = .responding
+                        publishSpatialAnnotations(
+                            resolvedSpatialAnnotations,
+                            expectedSpatialContextGeneration: responseSpatialContextGeneration
+                        )
                     } catch {
                         ClickyAnalytics.trackTTSError(error: error)
                         print("⚠️ ElevenLabs TTS error: \(error)")
+                        publishSpatialAnnotations(
+                            resolvedSpatialAnnotations,
+                            expectedSpatialContextGeneration: responseSpatialContextGeneration
+                        )
                         await speakWithSystemVoice(spokenText)
                     }
+                } else {
+                    publishSpatialAnnotations(
+                        resolvedSpatialAnnotations,
+                        expectedSpatialContextGeneration: responseSpatialContextGeneration
+                    )
                 }
+                scheduleSpatialAnnotationDismissal()
             } catch is CancellationError {
                 // User spoke again — response was interrupted
             } catch {
@@ -1148,6 +1259,53 @@ final class CompanionManager: ObservableObject {
         }
     }
 
+    private func scheduleSpatialAnnotationDismissal() {
+        guard !spatialAnnotations.isEmpty else { return }
+        let maximumSequenceNumber = spatialAnnotations
+            .map(\.sequenceNumber)
+            .max() ?? 1
+        let revealDuration = Duration.milliseconds(
+            maximumSequenceNumber * 180
+        )
+        spatialAnnotationDismissTask?.cancel()
+        spatialAnnotationDismissTask = Task {
+            try? await Task.sleep(for: .milliseconds(200))
+            while elevenLabsTTSClient.isPlaying || systemSpeechSynthesizer.isSpeaking {
+                try? await Task.sleep(for: .milliseconds(200))
+                guard !Task.isCancelled else { return }
+            }
+            try? await Task.sleep(for: revealDuration + .seconds(1))
+            guard !Task.isCancelled else { return }
+            spatialAnnotations = []
+            spatialAnnotationDismissTask = nil
+        }
+    }
+
+    private func publishSpatialAnnotations(
+        _ annotations: [CompanionSpatialAnnotation],
+        expectedSpatialContextGeneration: Int
+    ) {
+        spatialAnnotationDismissTask?.cancel()
+        spatialAnnotationDismissTask = nil
+        spatialAnnotations = spatialContextGeneration == expectedSpatialContextGeneration
+            ? annotations
+            : []
+        spatialAnnotationSceneGeneration &+= 1
+    }
+
+    private static func resolveScreenCapture(
+        requestedScreenNumber: Int?,
+        screenCaptures: [CompanionScreenCapture]
+    ) -> CompanionScreenCapture? {
+        let resolvedScreenNumber = SpatialAnnotationScreenResolver.resolvedScreenNumber(
+            requestedScreenNumber: requestedScreenNumber,
+            availableScreenNumbers: screenCaptures.compactMap(\.screenNumber),
+            cursorScreenNumber: screenCaptures.first(where: \.isCursorScreen)?.screenNumber
+        )
+        guard let resolvedScreenNumber else { return nil }
+        return screenCaptures.first(where: { $0.screenNumber == resolvedScreenNumber })
+    }
+
     private func speakWithSystemVoice(_ utterance: String) async {
         systemSpeechSynthesizer.stopSpeaking()
         systemSpeechSynthesizer.startSpeaking(utterance)
@@ -1170,7 +1328,8 @@ final class CompanionManager: ObservableObject {
         let spokenText: String
         /// The parsed pixel coordinate, or nil if Claude said "none" or no tag was found.
         let coordinate: CGPoint?
-        /// Short label describing the element (e.g. "run button"), or "none".
+        /// Short label describing the element (e.g. "run button"), or nil when
+        /// no point annotation was parsed from the response.
         let elementLabel: String?
         /// Which screen the coordinate refers to (1-based), or nil to default to cursor screen.
         let screenNumber: Int?
@@ -1179,43 +1338,23 @@ final class CompanionManager: ObservableObject {
     /// Parses a [POINT:x,y:label:screenN] or [POINT:none] tag from the end of Claude's response.
     /// Returns the spoken text (tag removed) and the optional coordinate + label + screen number.
     static func parsePointingCoordinates(from responseText: String) -> PointingParseResult {
-        // Match [POINT:none] or [POINT:123,456:label] or [POINT:123,456:label:screen2]
-        let pattern = #"\[POINT:(?:none|(\d+)\s*,\s*(\d+)(?::([^\]:\s][^\]:]*?))?(?::screen(\d+))?)\]\s*$"#
-
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: []),
-              let match = regex.firstMatch(in: responseText, range: NSRange(responseText.startIndex..., in: responseText)) else {
-            // No tag found at all
-            return PointingParseResult(spokenText: responseText, coordinate: nil, elementLabel: nil, screenNumber: nil)
+        let parseResult = SpatialAnnotationParser.parse(responseText)
+        guard let pointAnnotation = parseResult.annotations.first(where: { annotation in
+            if case .point = annotation.kind { return true }
+            return false
+        }), case .point(let point) = pointAnnotation.kind else {
+            return PointingParseResult(
+                spokenText: parseResult.spokenText,
+                coordinate: nil,
+                elementLabel: nil,
+                screenNumber: nil
+            )
         }
-
-        // Remove the tag from the spoken text
-        let tagRange = Range(match.range, in: responseText)!
-        let spokenText = String(responseText[..<tagRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // Check if it's [POINT:none]
-        guard match.numberOfRanges >= 3,
-              let xRange = Range(match.range(at: 1), in: responseText),
-              let yRange = Range(match.range(at: 2), in: responseText),
-              let x = Double(responseText[xRange]),
-              let y = Double(responseText[yRange]) else {
-            return PointingParseResult(spokenText: spokenText, coordinate: nil, elementLabel: "none", screenNumber: nil)
-        }
-
-        var elementLabel: String? = nil
-        if match.numberOfRanges >= 4, let labelRange = Range(match.range(at: 3), in: responseText) {
-            elementLabel = String(responseText[labelRange]).trimmingCharacters(in: .whitespaces)
-        }
-
-        var screenNumber: Int? = nil
-        if match.numberOfRanges >= 5, let screenRange = Range(match.range(at: 4), in: responseText) {
-            screenNumber = Int(responseText[screenRange])
-        }
-
         return PointingParseResult(
-            spokenText: spokenText,
-            coordinate: CGPoint(x: x, y: y),
-            elementLabel: elementLabel,
-            screenNumber: screenNumber
+            spokenText: parseResult.spokenText,
+            coordinate: CGPoint(x: point.x, y: point.y),
+            elementLabel: pointAnnotation.label,
+            screenNumber: pointAnnotation.screenNumber
         )
     }
 

@@ -85,6 +85,7 @@ enum BuddyNavigationMode {
 // replaced by a waveform (listening), spinner (processing), or
 // streaming text bubble (responding).
 struct BlueCursorView: View {
+    let displayIdentifier: CGDirectDisplayID
     let screenFrame: CGRect
     let isFirstAppearance: Bool
     @ObservedObject var companionManager: CompanionManager
@@ -92,7 +93,8 @@ struct BlueCursorView: View {
     @State private var cursorPosition: CGPoint
     @State private var isCursorOnThisScreen: Bool
 
-    init(screenFrame: CGRect, isFirstAppearance: Bool, companionManager: CompanionManager) {
+    init(displayIdentifier: CGDirectDisplayID, screenFrame: CGRect, isFirstAppearance: Bool, companionManager: CompanionManager) {
+        self.displayIdentifier = displayIdentifier
         self.screenFrame = screenFrame
         self.isFirstAppearance = isFirstAppearance
         self.companionManager = companionManager
@@ -167,6 +169,17 @@ struct BlueCursorView: View {
         ZStack {
             // Nearly transparent background (helps with compositing)
             Color.black.opacity(0.001)
+
+            SpatialAnnotationOverlayView(
+                annotations: companionManager.spatialAnnotations.filter {
+                    $0.displayIdentifier == displayIdentifier
+                        && $0.capturedDisplayFrame == screenFrame
+                },
+                maximumSequenceNumber: companionManager.spatialAnnotations
+                    .map(\.sequenceNumber)
+                    .max() ?? 0,
+                sceneGeneration: companionManager.spatialAnnotationSceneGeneration
+            )
 
             // Welcome speech bubble (first launch only)
             if isCursorOnThisScreen && showWelcome && !welcomeText.isEmpty {
@@ -804,6 +817,9 @@ class OverlayWindowManager {
             let window = OverlayWindow(screen: screen)
 
             let contentView = BlueCursorView(
+                displayIdentifier: (screen.deviceDescription[
+                    NSDeviceDescriptionKey("NSScreenNumber")
+                ] as? NSNumber)?.uint32Value ?? 0,
                 screenFrame: screen.frame,
                 isFirstAppearance: isFirstAppearance,
                 companionManager: companionManager
@@ -821,6 +837,7 @@ class OverlayWindowManager {
     func hideOverlay() {
         presentationGeneration &+= 1
         activeCompanionManager?.clearDetectedElementLocation()
+        activeCompanionManager?.clearSpatialAnnotations()
         for window in overlayWindows {
             window.orderOut(nil)
             window.contentView = nil
@@ -854,6 +871,7 @@ class OverlayWindowManager {
                     return
                 }
                 self.activeCompanionManager?.clearDetectedElementLocation()
+                self.activeCompanionManager?.clearSpatialAnnotations()
                 self.overlayWindows.removeAll()
             }
         })

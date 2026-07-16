@@ -11,6 +11,8 @@ import AppKit
 import ScreenCaptureKit
 
 struct CompanionScreenCapture {
+    let displayIdentifier: CGDirectDisplayID
+    let screenNumber: Int?
     let imageData: Data
     let label: String
     let isCursorScreen: Bool
@@ -54,7 +56,8 @@ enum CompanionScreenCaptureUtility {
             content: content,
             excludingWindows: excludedOwnAppWindows,
             displayFrame: displayFrame,
-            label: "display containing the focused text field"
+            label: "display containing the focused text field",
+            screenNumber: nil
         ) else {
             throw NSError(
                 domain: "CompanionScreenCapture",
@@ -130,7 +133,8 @@ enum CompanionScreenCaptureUtility {
                 content: content,
                 excludingWindows: excludedOwnAppWindows,
                 displayFrame: displayFrame,
-                label: screenLabel
+                label: screenLabel,
+                screenNumber: displayIndex + 1
             ) {
                 capturedScreens.append(screenCapture)
             }
@@ -176,7 +180,8 @@ enum CompanionScreenCaptureUtility {
         content: SCShareableContent,
         excludingWindows ownAppWindows: [SCWindow],
         displayFrame: CGRect,
-        label: String
+        label: String,
+        screenNumber: Int?
     ) async throws -> CompanionScreenCapture? {
         let filter = SCContentFilter(
             display: display,
@@ -203,6 +208,8 @@ enum CompanionScreenCaptureUtility {
         }
 
         return CompanionScreenCapture(
+            displayIdentifier: display.displayID,
+            screenNumber: screenNumber,
             imageData: JPEGData,
             label: label,
             isCursorScreen: displayFrame.contains(NSEvent.mouseLocation),
