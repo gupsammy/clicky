@@ -118,6 +118,16 @@ final class CodexAppServerProcessTransport: CodexAppServerTransport, @unchecked 
         process.standardOutput = standardOutputPipe
         process.standardError = standardErrorPipe
 
+        // If the app-server dies between send()'s liveness check and the actual
+        // stdin write, writing to a pipe with no reader raises SIGPIPE, which
+        // kills the whole app rather than throwing. F_SETNOSIGPIPE converts that
+        // into an EPIPE error that FileHandle.write(contentsOf:) throws normally.
+        _ = fcntl(
+            standardInputPipe.fileHandleForWriting.fileDescriptor,
+            F_SETNOSIGPIPE,
+            1
+        )
+
         self.process = process
         self.standardInputPipe = standardInputPipe
         self.standardOutputPipe = standardOutputPipe
