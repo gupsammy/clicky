@@ -42,6 +42,15 @@ jobs:
           # On manual dispatch, build the PR's head instead of main
           ref: ${{ inputs.pr_number && format('refs/pull/{0}/head', inputs.pr_number) || github.ref }}
 
+      # Older branches predate the shared scheme (schemes used to live only in
+      # untracked xcuserdata) — borrow it from main so xcodebuild can find it
+      - name: Restore shared scheme if branch predates it
+        run: |
+          if [ ! -f "leanring-buddy.xcodeproj/xcshareddata/xcschemes/leanring-buddy.xcscheme" ]; then
+            git fetch --depth=1 origin main
+            git checkout FETCH_HEAD -- leanring-buddy.xcodeproj/xcshareddata
+          fi
+
       - name: Resolve Swift package dependencies
         run: |
           xcodebuild -resolvePackageDependencies \
