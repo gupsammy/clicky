@@ -75,7 +75,7 @@ Worker vars: `ELEVENLABS_VOICE_ID`, `VERTEX_PROJECT_ID`, `VERTEX_REGION`, `OPENA
 | File | Lines | Purpose |
 |------|-------|---------|
 | `leanring_buddyApp.swift` | ~98 | Menu bar app entry point. Uses `@NSApplicationDelegateAdaptor` with `CompanionAppDelegate`, which creates the companion panel plus agent coordinator/presentation/HUD managers and starts `CompanionManager`. No main window — the app lives entirely in the status bar. |
-| `CompanionManager.swift` | ~1340 | Central state machine. Owns shortcut routing, literal and screen-aware dictation, focused-field insertion, screen capture, Claude API, ElevenLabs TTS, and overlay management. Tracks voice state, conversation history, model selection, and cursor visibility. |
+| `CompanionManager.swift` | ~1370 | Central state machine. Owns shortcut routing, literal and screen-aware dictation, focused-field insertion, screen capture, Claude API, ElevenLabs TTS, and overlay management. Tracks voice state, conversation history, model selection, and cursor visibility. |
 | `MenuBarPanelManager.swift` | ~255 | NSStatusItem + custom NSPanel lifecycle. Creates the menu bar icon, manages the floating companion panel, opens the agent HUD, and installs click-outside-to-dismiss behavior. |
 | `CompanionPanelView.swift` | ~761 | SwiftUI panel content for the menu bar dropdown. Shows companion status, push-to-talk instructions, model picker (Sonnet/Opus), permissions UI, DM feedback button, and quit button. Dark aesthetic using `DS` design system. |
 | `OverlayWindow.swift` | ~863 | Full-screen transparent overlay hosting the blue cursor, response text, waveform, and spinner. Handles cursor following, element pointing with bezier arcs, multi-monitor coordinate mapping, and fade-out transitions. |
@@ -95,7 +95,7 @@ Worker vars: `ELEVENLABS_VOICE_ID`, `VERTEX_PROJECT_ID`, `VERTEX_REGION`, `OPENA
 | `ClickyProxyAuthorization.swift` | ~64 | Reads the deployment-specific Worker bearer token from the macOS Keychain and authorizes proxy requests without embedding it in the app. |
 | `AppleSpeechTranscriptionProvider.swift` | ~147 | Local fallback transcription provider backed by Apple's Speech framework. |
 | `BuddyAudioConversionSupport.swift` | ~108 | Audio conversion helpers. Converts live mic buffers to PCM16 mono audio and builds WAV payloads for upload-based providers. |
-| `DictationCore/SpokenIntentRouter.swift` | ~85 | Pure explicit voice-route parser. Recognizes punctuation-tolerant “Hey Clicky, agent” commands before composition or companion fallback and refuses incomplete triggers. |
+| `DictationCore/SpokenIntentRouter.swift` | ~375 | Pure voice router and follow-up target resolver. Recognizes explicit start/continue phrases, conservatively classifies durable multi-step tasks, preserves focused composition, and refuses ambiguous agent targeting. |
 | `GlobalPushToTalkShortcutMonitor.swift` | ~168 | System-wide push-to-talk monitor. Owns the listen-only `CGEvent` tap, resolves exact fast-dictation versus companion chords, requires a neutral state between chords, and publishes typed press/release events. |
 | `ClaudeAPI.swift` | ~291 | Claude vision API client with streaming (SSE) and non-streaming modes. TLS warmup optimization, image MIME detection, conversation history support. |
 | `OpenAIAPI.swift` | ~142 | OpenAI GPT vision API client. |
@@ -112,8 +112,8 @@ Worker vars: `ELEVENLABS_VOICE_ID`, `VERTEX_PROJECT_ID`, `VERTEX_REGION`, `OPENA
 | `AgentCore/CodexAgentClient.swift` | ~153 | Safe app-server thread and turn operations: start, resume, list, read, start turn, steer, and interrupt. |
 | `AgentCore/CodexAgentTaskModels.swift` | ~183 | HUD-independent task, typed compaction/activity, approval, structured user-input, idle, and event models for concurrent agent progress. |
 | `AgentCore/CodexAgentTaskStore.swift` | ~819 | Actor reducer and stream monitor that converts ordered Codex notifications and request-ID-bound approvals/input into bounded snapshots, keeps `turn/completed` authoritative, and protects live turns from stale hydration. |
-| `AgentCore/CodexAgentCoordinator.swift` | ~274 | Workspace-scoped orchestration for account refresh/login, history, thread/turn start, same-thread follow-up, steer, interrupt, typed approvals, and structured user-input responses. |
-| `AgentPresentationModel.swift` | ~889 | Main-actor projection from snapshots, identity-bound authentication lifecycle, and process failures into workspace-filtered routes, forms, approvals/input, explicit token dismissal, and low-frequency layout revisions. |
+| `AgentCore/CodexAgentCoordinator.swift` | ~284 | Workspace-scoped orchestration for account refresh/login, history, thread/turn start, same-thread follow-up, steer, interrupt, typed approvals, and structured user-input responses. |
+| `AgentPresentationModel.swift` | ~1022 | Main-actor projection from snapshots, identity-bound authentication lifecycle, and process failures into workspace-filtered routes, forms, approvals/input, spoken start/follow-up dispatch, explicit token dismissal, and low-frequency layout revisions. |
 | `AgentHUDWindowManager.swift` | ~228 | Owns non-activating notch and top-right token panels, active-screen placement, key-window release, click-outside behavior, and frame changes only when layout actually changes. |
 | `AgentNotchView.swift` | ~632 | Flat-top, rounded-bottom notch shell with Home/Agents navigation, signed-out recovery, dense active/recent task rows, new-agent form, and preview fixtures. |
 | `AgentTaskDetailView.swift` | ~599 | Running, scoped approval, structured input, terminal, activity, artifact, stop, follow-up, and explicit delivery-token dismissal states. |

@@ -622,12 +622,17 @@ final class CompanionManager: ObservableObject {
                         print("🗣️ Companion received final transcript (\(finalTranscript.count) characters)")
                         let spokenRequestRoute = SpokenIntentRouter.route(
                             finalTranscript,
-                            hasScreenAwareDestination: self.activeScreenAwareDictationFocusContext != nil
+                            hasScreenAwareDestination: self.activeScreenAwareDictationFocusContext != nil,
+                            agentConversationContext: self.agentPresentationModel.spokenAgentConversationContext
                         )
                         switch spokenRequestRoute {
                         case .agent(let agentPrompt):
                             ClickyAnalytics.trackSpokenAgentTaskRouted(prompt: agentPrompt)
                             self.routeSpokenRequestToAgent(prompt: agentPrompt)
+                        case .agentFollowUp(let followUpPrompt):
+                            self.routeSpokenFollowUpToAgent(prompt: followUpPrompt)
+                        case .agentStatus:
+                            self.routeSpokenAgentStatus()
                         case .invalidAgentTrigger:
                             ClickyAnalytics.trackSpokenAgentTriggerInvalid()
                             self.reportSpokenRoutingFailure(
@@ -693,6 +698,34 @@ final class CompanionManager: ObservableObject {
         agentPresentationModel.startSpokenTask(prompt: prompt)
         voiceState = .idle
         scheduleTransientHideIfNeeded()
+    }
+
+    private func routeSpokenFollowUpToAgent(prompt: String) {
+        currentResponseTask?.cancel()
+        elevenLabsTTSClient.stopPlayback()
+        systemSpeechSynthesizer.stopSpeaking()
+        clearDetectedElementLocation()
+        agentPresentationModel.sendSpokenFollowUp(prompt: prompt)
+        voiceState = .idle
+        scheduleTransientHideIfNeeded()
+    }
+
+    private func routeSpokenAgentStatus() {
+        currentResponseTask?.cancel()
+        elevenLabsTTSClient.stopPlayback()
+        systemSpeechSynthesizer.stopSpeaking()
+        clearDetectedElementLocation()
+        agentPresentationModel.showOverview()
+
+        currentResponseGeneration &+= 1
+        let responseGeneration = currentResponseGeneration
+        currentResponseTask = Task {
+            defer { finishResponseTask(responseGeneration: responseGeneration) }
+            await speakWithSystemVoice(agentPresentationModel.spokenAgentStatusSummary)
+            guard !Task.isCancelled else { return }
+            voiceState = .idle
+            scheduleTransientHideIfNeeded()
+        }
     }
 
     private func reportSpokenRoutingFailure(_ errorMessage: String) {

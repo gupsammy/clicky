@@ -88,6 +88,24 @@ final class AgentPresentationModel: ObservableObject {
         return taskSnapshots.first { $0.threadID == selectedThreadID }
     }
 
+    var spokenAgentConversationContext: SpokenAgentConversationContext {
+        if selectedTask != nil { return .selected }
+        if runningTasks.count == 1 { return .soleRunning }
+        if runningTasks.count > 1 { return .ambiguous }
+        return .none
+    }
+
+    var spokenAgentStatusSummary: String {
+        switch runningTasks.count {
+        case 0:
+            return "No agents are running."
+        case 1:
+            return "One agent is running."
+        default:
+            return "\(runningTasks.count) agents are running."
+        }
+    }
+
     var canRunTask: Bool {
         connectionPhase.isConnected
             && workspacePath != nil
@@ -476,20 +494,75 @@ final class AgentPresentationModel: ObservableObject {
     }
 
     func sendFollowUp() {
-        guard let coordinator,
-              let selectedTask,
-              let workspace = workspace(for: selectedTask) else {
+        let prompt = followUpPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let selectedTask, !prompt.isEmpty else { return }
+        beginFollowUp(
+            prompt: prompt,
+            on: selectedTask,
+            clearsTypedComposerOnSuccess: true
+        )
+    }
+
+    func sendSpokenFollowUp(prompt: String) {
+        let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPrompt.isEmpty else { return }
+
+        let followUpTargetResolution = SpokenAgentFollowUpTargetResolver.resolve(
+            selectedThreadID: selectedTask?.threadID,
+            runningThreadIDs: runningTasks.map(\.threadID)
+        )
+        let targetTask: CodexAgentTaskSnapshot
+        switch followUpTargetResolution {
+        case .target(let threadID):
+            guard let resolvedTargetTask = taskSnapshots.first(
+                where: { $0.threadID == threadID }
+            ) else {
+                showOverview()
+                operationErrorMessage = "That agent is no longer available."
+                return
+            }
+            targetTask = resolvedTargetTask
+        case .requiresSelection:
+            showOverview()
+            operationErrorMessage = "Open the agent you want to continue, then repeat the instruction."
+            return
+        case .missing:
+            showOverview()
+            operationErrorMessage = "Open a recent agent before giving it a follow-up."
             return
         }
 
-        let prompt = followUpPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty, !isPerformingOperation else { return }
+        showTask(threadID: targetTask.threadID)
+        beginFollowUp(
+            prompt: trimmedPrompt,
+            on: targetTask,
+            clearsTypedComposerOnSuccess: false
+        )
+    }
+
+    private func beginFollowUp(
+        prompt: String,
+        on targetTask: CodexAgentTaskSnapshot,
+        clearsTypedComposerOnSuccess: Bool
+    ) {
+        guard let coordinator else {
+            operationErrorMessage = "Codex is disconnected. Reconnect, then repeat the follow-up."
+            return
+        }
+        guard let workspace = workspace(for: targetTask) else {
+            operationErrorMessage = "This agent's folder is no longer available."
+            return
+        }
+        guard !isPerformingOperation else {
+            operationErrorMessage = "Clicky is finishing another agent action. Repeat the follow-up when it finishes."
+            return
+        }
 
         isPerformingOperation = true
         operationErrorMessage = nil
-        dismissedTokenThreadIDs.remove(selectedTask.threadID)
-        if displayIdentifierByThreadID[selectedTask.threadID] == nil {
-            displayIdentifierByThreadID[selectedTask.threadID] = Self.displayIdentifierContainingMouse()
+        dismissedTokenThreadIDs.remove(targetTask.threadID)
+        if displayIdentifierByThreadID[targetTask.threadID] == nil {
+            displayIdentifierByThreadID[targetTask.threadID] = Self.displayIdentifierContainingMouse()
                 ?? NSScreen.main.flatMap(Self.displayIdentifier)
         }
         tokenLayoutRevision &+= 1
@@ -506,14 +579,16 @@ final class AgentPresentationModel: ObservableObject {
             do {
                 try await coordinator.followUp(
                     prompt: prompt,
-                    on: selectedTask,
+                    on: targetTask,
                     in: workspace
                 )
                 guard isCurrentSession(
                     coordinator,
                     expectedGeneration: expectedGeneration
                 ) else { return }
-                followUpPrompt = ""
+                if clearsTypedComposerOnSuccess {
+                    followUpPrompt = ""
+                }
             } catch {
                 guard isCurrentSession(
                     coordinator,
