@@ -1246,6 +1246,12 @@ final class CompanionManager: ObservableObject {
 
     private func scheduleSpatialAnnotationDismissal() {
         guard !spatialAnnotations.isEmpty else { return }
+        let maximumSequenceNumber = spatialAnnotations
+            .map(\.sequenceNumber)
+            .max() ?? 1
+        let revealDuration = Duration.milliseconds(
+            maximumSequenceNumber * 180
+        )
         spatialAnnotationDismissTask?.cancel()
         spatialAnnotationDismissTask = Task {
             try? await Task.sleep(for: .milliseconds(200))
@@ -1253,7 +1259,7 @@ final class CompanionManager: ObservableObject {
                 try? await Task.sleep(for: .milliseconds(200))
                 guard !Task.isCancelled else { return }
             }
-            try? await Task.sleep(for: .seconds(1))
+            try? await Task.sleep(for: revealDuration + .seconds(1))
             guard !Task.isCancelled else { return }
             spatialAnnotations = []
             spatialAnnotationDismissTask = nil
