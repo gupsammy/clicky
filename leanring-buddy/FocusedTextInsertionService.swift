@@ -281,6 +281,21 @@ final class FocusedTextInsertionService {
         into focusContext: DictationFocusContext,
         matching screenAwareFocusedTextContext: ScreenAwareFocusedTextContext
     ) async throws -> FocusedTextInsertionMethod {
+        try validateScreenAwareFocusedTextContext(
+            screenAwareFocusedTextContext,
+            for: focusContext
+        )
+
+        return try await insert(
+            transcriptText: compositionText,
+            into: focusContext
+        )
+    }
+
+    func validateScreenAwareFocusedTextContext(
+        _ screenAwareFocusedTextContext: ScreenAwareFocusedTextContext,
+        for focusContext: DictationFocusContext
+    ) throws {
         try validateFocusContext(focusContext)
         guard let currentTextState = textState(on: focusContext.focusedElement),
               currentTextState.value == screenAwareFocusedTextContext.sourceValue,
@@ -289,11 +304,6 @@ final class FocusedTextInsertionService {
                 message: "The focused text changed while Clicky was composing, so Clicky did not insert the result."
             )
         }
-
-        return try await insert(
-            transcriptText: compositionText,
-            into: focusContext
-        )
     }
 
     private func validateFocusContext(_ focusContext: DictationFocusContext) throws {

@@ -101,6 +101,7 @@ final class CompanionManager: ObservableObject {
     private var activeFastDictationInsertionTask: Task<Void, Never>?
     private var fastDictationStartedAt: Date?
     private var activeScreenAwareDictationFocusContext: DictationFocusContext?
+    private var activeScreenAwareFocusedTextContext: ScreenAwareFocusedTextContext?
     private var screenAwareDictationStartedAt: Date?
     /// Scheduled hide for transient cursor mode — cancelled if the user
     /// speaks again before the delay elapses.
@@ -308,6 +309,9 @@ final class CompanionManager: ObservableObject {
         buddyDictationManager.cancelCurrentDictation()
         activeFastDictationFocusContext = nil
         fastDictationStartedAt = nil
+        activeScreenAwareDictationFocusContext = nil
+        activeScreenAwareFocusedTextContext = nil
+        screenAwareDictationStartedAt = nil
         activeFastDictationInsertionTask?.cancel()
         activeFastDictationInsertionTask = nil
         overlayWindowManager.hideOverlay()
@@ -519,19 +523,18 @@ final class CompanionManager: ObservableObject {
             activeFastDictationFocusContext = nil
             fastDictationStartedAt = nil
             activeScreenAwareDictationFocusContext = nil
+            activeScreenAwareFocusedTextContext = nil
             screenAwareDictationStartedAt = nil
             // Don't register push-to-talk while the onboarding video is playing
             guard !showOnboardingVideo else { return }
 
-            // This eligibility probe is intentionally repeated inside
-            // composeAndInsertScreenAwareText once the transcript is final:
-            // re-reading the field at composition time is what makes the
-            // stale-value check before insertion meaningful. Do not cache
-            // this probe's context for reuse there.
             if openAIScreenCompositionClient.isConfigured,
                let focusContext = try? focusedTextInsertionService.captureFocusContext(),
-               (try? focusedTextInsertionService.screenAwareContext(for: focusContext)) != nil {
+               let focusedTextContext = try? focusedTextInsertionService
+                    .screenAwareContext(for: focusContext),
+               focusedTextContext.focusedElementFrameInCoreGraphicsCoordinates != nil {
                 activeScreenAwareDictationFocusContext = focusContext
+                activeScreenAwareFocusedTextContext = focusedTextContext
                 screenAwareDictationStartedAt = Date()
             }
 
@@ -583,10 +586,12 @@ final class CompanionManager: ObservableObject {
                         guard let self else { return }
                         self.lastTranscript = finalTranscript
                         print("🗣️ Companion received final transcript (\(finalTranscript.count) characters)")
-                        if let focusContext = self.activeScreenAwareDictationFocusContext {
+                        if let focusContext = self.activeScreenAwareDictationFocusContext,
+                           let focusedTextContext = self.activeScreenAwareFocusedTextContext {
                             self.composeAndInsertScreenAwareText(
                                 spokenInstruction: finalTranscript,
                                 focusContext: focusContext,
+                                focusedTextContext: focusedTextContext,
                                 startedAt: self.screenAwareDictationStartedAt
                             )
                         } else {
@@ -594,10 +599,12 @@ final class CompanionManager: ObservableObject {
                             self.sendTranscriptToClaudeWithScreenshot(transcript: finalTranscript)
                         }
                         self.activeScreenAwareDictationFocusContext = nil
+                        self.activeScreenAwareFocusedTextContext = nil
                         self.screenAwareDictationStartedAt = nil
                     },
                     dictationSessionFinished: { [weak self] in
                         self?.activeScreenAwareDictationFocusContext = nil
+                        self?.activeScreenAwareFocusedTextContext = nil
                         self?.screenAwareDictationStartedAt = nil
                     }
                 )
@@ -726,6 +733,7 @@ final class CompanionManager: ObservableObject {
     private func composeAndInsertScreenAwareText(
         spokenInstruction: String,
         focusContext: DictationFocusContext,
+        focusedTextContext: ScreenAwareFocusedTextContext,
         startedAt: Date?
     ) {
         currentResponseTask?.cancel()
@@ -736,8 +744,10 @@ final class CompanionManager: ObservableObject {
             voiceState = .processing
 
             do {
-                let focusedTextContext = try focusedTextInsertionService
-                    .screenAwareContext(for: focusContext)
+                try focusedTextInsertionService.validateScreenAwareFocusedTextContext(
+                    focusedTextContext,
+                    for: focusContext
+                )
                 guard let focusedElementFrame = focusedTextContext
                     .focusedElementFrameInCoreGraphicsCoordinates else {
                     throw FocusedTextInsertionError(
