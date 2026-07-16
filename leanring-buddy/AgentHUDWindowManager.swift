@@ -24,14 +24,15 @@ final class AgentHUDWindowManager {
     private var screenChangeObserver: NSObjectProtocol?
     private var activeSpaceChangeObserver: NSObjectProtocol?
     private var outsideClickMonitor: Any?
-    private var wasNotchExpanded = false
+    private var lastHandledTokenOpenRevision = 0
 
     init(presentationModel: AgentPresentationModel) {
         self.presentationModel = presentationModel
 
-        modelObservation = Publishers.Merge(
+        modelObservation = Publishers.Merge3(
             presentationModel.$isNotchExpanded.map { _ in () },
-            presentationModel.$tokenLayoutRevision.map { _ in () }
+            presentationModel.$tokenLayoutRevision.map { _ in () },
+            presentationModel.$tokenOpenRevision.map { _ in () }
         )
         .dropFirst()
         .sink { [weak self] _ in
@@ -89,7 +90,7 @@ final class AgentHUDWindowManager {
         notchPanel?.orderOut(nil)
         notchPanel?.contentView = nil
         notchPanel = nil
-        wasNotchExpanded = false
+        lastHandledTokenOpenRevision = presentationModel.tokenOpenRevision
 
         for panel in tokenPanelsByDisplayIdentifier.values {
             panel.orderOut(nil)
@@ -132,19 +133,21 @@ final class AgentHUDWindowManager {
         }
 
         createNotchPanelIfNeeded()
-        let shouldRehomeNotchBeforeExpanding =
-            presentationModel.isNotchExpanded && !wasNotchExpanded
+        let shouldRehomeNotchForTokenOpen =
+            presentationModel.isNotchExpanded
+                && presentationModel.tokenOpenRevision
+                    != lastHandledTokenOpenRevision
         updateNotchPanel(
             on: primaryScreen,
-            shouldRehomeBeforeExpanding: shouldRehomeNotchBeforeExpanding
+            shouldRehomeForTokenOpen: shouldRehomeNotchForTokenOpen
         )
-        wasNotchExpanded = presentationModel.isNotchExpanded
+        lastHandledTokenOpenRevision = presentationModel.tokenOpenRevision
         reconcileTokenPanels()
     }
 
     private func updateNotchPanel(
         on screen: NSScreen,
-        shouldRehomeBeforeExpanding: Bool
+        shouldRehomeForTokenOpen: Bool
     ) {
         guard let notchPanel else { return }
 
@@ -167,10 +170,10 @@ final class AgentHUDWindowManager {
         notchPanel.contentView?.frame = CGRect(origin: .zero, size: panelSize)
 
         // A token panel can activate the Space where it was created. Ordering
-        // the existing notch out before the collapsed-to-expanded transition
-        // makes AppKit attach it to that active Space without replacing the
-        // NSHostingView or discarding local structured-input state.
-        if shouldRehomeBeforeExpanding {
+        // the existing notch out for every token-open action makes AppKit
+        // attach it to that Space without replacing the NSHostingView or
+        // discarding local structured-input state.
+        if shouldRehomeForTokenOpen {
             notchPanel.orderOut(nil)
         }
         notchPanel.orderFrontRegardless()
