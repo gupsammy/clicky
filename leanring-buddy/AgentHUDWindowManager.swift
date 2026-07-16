@@ -24,6 +24,7 @@ final class AgentHUDWindowManager {
     private var screenChangeObserver: NSObjectProtocol?
     private var activeSpaceChangeObserver: NSObjectProtocol?
     private var outsideClickMonitor: Any?
+    private var wasNotchExpanded = false
 
     init(presentationModel: AgentPresentationModel) {
         self.presentationModel = presentationModel
@@ -88,6 +89,7 @@ final class AgentHUDWindowManager {
         notchPanel?.orderOut(nil)
         notchPanel?.contentView = nil
         notchPanel = nil
+        wasNotchExpanded = false
 
         for panel in tokenPanelsByDisplayIdentifier.values {
             panel.orderOut(nil)
@@ -130,11 +132,20 @@ final class AgentHUDWindowManager {
         }
 
         createNotchPanelIfNeeded()
-        updateNotchPanel(on: primaryScreen)
+        let shouldRehomeNotchBeforeExpanding =
+            presentationModel.isNotchExpanded && !wasNotchExpanded
+        updateNotchPanel(
+            on: primaryScreen,
+            shouldRehomeBeforeExpanding: shouldRehomeNotchBeforeExpanding
+        )
+        wasNotchExpanded = presentationModel.isNotchExpanded
         reconcileTokenPanels()
     }
 
-    private func updateNotchPanel(on screen: NSScreen) {
+    private func updateNotchPanel(
+        on screen: NSScreen,
+        shouldRehomeBeforeExpanding: Bool
+    ) {
         guard let notchPanel else { return }
 
         let panelSize = presentationModel.isNotchExpanded
@@ -154,6 +165,14 @@ final class AgentHUDWindowManager {
             )
         }
         notchPanel.contentView?.frame = CGRect(origin: .zero, size: panelSize)
+
+        // A token panel can activate the Space where it was created. Ordering
+        // the existing notch out before the collapsed-to-expanded transition
+        // makes AppKit attach it to that active Space without replacing the
+        // NSHostingView or discarding local structured-input state.
+        if shouldRehomeBeforeExpanding {
+            notchPanel.orderOut(nil)
+        }
         notchPanel.orderFrontRegardless()
 
         if presentationModel.isNotchExpanded {
