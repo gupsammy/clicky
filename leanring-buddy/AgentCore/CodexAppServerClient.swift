@@ -10,6 +10,8 @@ import Foundation
 actor CodexAppServerClient {
     nonisolated let notifications: AsyncStream<CodexAppServerNotification>
     nonisolated let serverRequests: AsyncStream<CodexAppServerRequest>
+    nonisolated let failures: AsyncStream<CodexAppServerError>
+    nonisolated let accountLoginCompletions: AsyncStream<CodexAppServerAccountLoginCompletedNotification>
 
     private enum TransportEvent: Sendable {
         case message(generation: UInt64, data: Data)
@@ -29,6 +31,8 @@ actor CodexAppServerClient {
     private let jsonDecoder = JSONDecoder()
     private let notificationContinuation: AsyncStream<CodexAppServerNotification>.Continuation
     private let serverRequestContinuation: AsyncStream<CodexAppServerRequest>.Continuation
+    private let failureContinuation: AsyncStream<CodexAppServerError>.Continuation
+    private let accountLoginCompletionContinuation: AsyncStream<CodexAppServerAccountLoginCompletedNotification>.Continuation
     private let transportEvents: AsyncStream<TransportEvent>
     private let transportEventContinuation: AsyncStream<TransportEvent>.Continuation
     private let requestTimeoutNanoseconds: UInt64
@@ -52,9 +56,18 @@ actor CodexAppServerClient {
         requestTimeoutNanoseconds: UInt64 = 15_000_000_000
     ) {
         let notificationStreamPair = AsyncStream<CodexAppServerNotification>.makeStream(
-            bufferingPolicy: .bufferingNewest(500)
+            // Protocol notifications are the authoritative ordered event log.
+            // Coalesce only after reduction into full UI snapshots; dropping an
+            // input event here can lose a terminal turn or corrupt message text.
+            bufferingPolicy: .unbounded
         )
         let serverRequestStreamPair = AsyncStream<CodexAppServerRequest>.makeStream(
+            bufferingPolicy: .unbounded
+        )
+        let failureStreamPair = AsyncStream<CodexAppServerError>.makeStream(
+            bufferingPolicy: .bufferingNewest(1)
+        )
+        let accountLoginCompletionStreamPair = AsyncStream<CodexAppServerAccountLoginCompletedNotification>.makeStream(
             bufferingPolicy: .unbounded
         )
         let transportEventStreamPair = AsyncStream<TransportEvent>.makeStream(
@@ -67,6 +80,10 @@ actor CodexAppServerClient {
         self.notificationContinuation = notificationStreamPair.continuation
         self.serverRequests = serverRequestStreamPair.stream
         self.serverRequestContinuation = serverRequestStreamPair.continuation
+        self.failures = failureStreamPair.stream
+        self.failureContinuation = failureStreamPair.continuation
+        self.accountLoginCompletions = accountLoginCompletionStreamPair.stream
+        self.accountLoginCompletionContinuation = accountLoginCompletionStreamPair.continuation
         self.transportEvents = transportEventStreamPair.stream
         self.transportEventContinuation = transportEventStreamPair.continuation
         self.requestTimeoutNanoseconds = requestTimeoutNanoseconds
@@ -77,6 +94,8 @@ actor CodexAppServerClient {
         transport.stop()
         notificationContinuation.finish()
         serverRequestContinuation.finish()
+        failureContinuation.finish()
+        accountLoginCompletionContinuation.finish()
         transportEventContinuation.finish()
     }
 
@@ -173,6 +192,31 @@ actor CodexAppServerClient {
         return try await sendRequest(
             method: "account/read",
             parameters: CodexAppServerAccountReadParameters(refreshToken: true)
+        )
+    }
+
+    func startChatGPTLogin() async throws -> CodexAppServerChatGPTLoginResponse {
+        guard connectionState == .connected else {
+            throw CodexAppServerError.notConnected
+        }
+
+        return try await sendRequest(
+            method: "account/login/start",
+            parameters: CodexAppServerChatGPTLoginParameters()
+        )
+    }
+
+    @discardableResult
+    func cancelChatGPTLogin(
+        loginID: String
+    ) async throws -> CodexAppServerCancelLoginResponse {
+        guard connectionState == .connected else {
+            throw CodexAppServerError.notConnected
+        }
+
+        return try await sendRequest(
+            method: "account/login/cancel",
+            parameters: CodexAppServerCancelLoginParameters(loginId: loginID)
         )
     }
 
@@ -296,6 +340,15 @@ actor CodexAppServerClient {
                     )
                 )
             } else {
+                if method == "account/login/completed",
+                   let notificationParameters = incomingMessage.params,
+                   let encodedParameters = try? jsonEncoder.encode(notificationParameters),
+                   let loginCompletion = try? jsonDecoder.decode(
+                       CodexAppServerAccountLoginCompletedNotification.self,
+                       from: encodedParameters
+                   ) {
+                    accountLoginCompletionContinuation.yield(loginCompletion)
+                }
                 notificationContinuation.yield(
                     CodexAppServerNotification(
                         method: method,
@@ -360,6 +413,7 @@ actor CodexAppServerClient {
         activeTransportGeneration = nil
         failPendingRequests(with: terminationError)
         connectionState = .disconnected
+        failureContinuation.yield(terminationError)
     }
 
     private func handleFatalProtocolError(_ protocolError: CodexAppServerError) {
@@ -367,6 +421,7 @@ actor CodexAppServerClient {
         failPendingRequests(with: protocolError)
         transport.stop()
         connectionState = .disconnected
+        failureContinuation.yield(protocolError)
     }
 
     private func failPendingRequests(with error: Error) {

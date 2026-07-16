@@ -205,6 +205,60 @@ struct CodexAppServerAccountReadResponse: Codable, Equatable, Sendable {
     }
 }
 
+struct CodexAppServerChatGPTLoginParameters: Codable, Equatable, Sendable {
+    let type: String
+    let appBrand: String
+    let codexStreamlinedLogin: Bool
+    let useHostedLoginSuccessPage: Bool
+
+    init(
+        appBrand: String = "codex",
+        codexStreamlinedLogin: Bool = true,
+        useHostedLoginSuccessPage: Bool = true
+    ) {
+        self.type = "chatgpt"
+        self.appBrand = appBrand
+        self.codexStreamlinedLogin = codexStreamlinedLogin
+        self.useHostedLoginSuccessPage = useHostedLoginSuccessPage
+    }
+}
+
+struct CodexAppServerChatGPTLoginResponse: Codable, Equatable, Sendable {
+    let type: String
+    let loginId: String
+    let authUrl: String
+}
+
+struct CodexAppServerCancelLoginParameters: Codable, Equatable, Sendable {
+    let loginId: String
+}
+
+enum CodexAppServerCancelLoginStatus: String, Codable, Equatable, Sendable {
+    case canceled
+    case notFound
+}
+
+struct CodexAppServerCancelLoginResponse: Codable, Equatable, Sendable {
+    let status: CodexAppServerCancelLoginStatus
+}
+
+struct CodexAppServerAccountLoginCompletedNotification: Codable, Equatable, Sendable {
+    let loginId: String?
+    let success: Bool
+    let error: String?
+}
+
+enum CodexAppServerLoginCompletionMatcher {
+    static func matches(
+        _ notification: CodexAppServerAccountLoginCompletedNotification,
+        activeLoginID: String,
+        allowsMissingLoginID: Bool
+    ) -> Bool {
+        notification.loginId == activeLoginID
+            || (allowsMissingLoginID && notification.loginId == nil)
+    }
+}
+
 struct CodexAppServerSession: Equatable, Sendable {
     let initialization: CodexAppServerInitializeResponse
     let account: CodexAppServerAccountReadResponse
@@ -231,6 +285,8 @@ enum CodexAppServerError: LocalizedError, Equatable, Sendable {
     case executableNotFound
     case invalidAgentWorkspace(path: String)
     case emptyAgentPrompt
+    case threadBusyCompacting
+    case loginTimedOut
     case alreadyConnected
     case notConnected
     case malformedMessage
@@ -248,6 +304,10 @@ enum CodexAppServerError: LocalizedError, Equatable, Sendable {
             return "The selected Agent Folder is not an existing directory: \(path)"
         case .emptyAgentPrompt:
             return "An agent prompt cannot be empty."
+        case .threadBusyCompacting:
+            return "This agent is compacting its conversation. Continue after compaction finishes."
+        case .loginTimedOut:
+            return "Codex sign-in timed out. Start again when you are ready."
         case .alreadyConnected:
             return "Clicky is already connected to Codex app-server."
         case .notConnected:
@@ -260,12 +320,8 @@ enum CodexAppServerError: LocalizedError, Equatable, Sendable {
             return "Codex app-server did not respond to \(method) in time."
         case .protocolFailure(_, let message):
             return message
-        case .processTerminated(let exitCode, let standardError):
-            let trimmedStandardError = standardError.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmedStandardError.isEmpty {
-                return "Codex app-server exited with status \(exitCode)."
-            }
-            return "Codex app-server exited with status \(exitCode): \(trimmedStandardError)"
+        case .processTerminated(let exitCode, _):
+            return "Codex app-server stopped unexpectedly (status \(exitCode))."
         case .threadOutsideWorkspace(let threadID, let workspacePath):
             return "Thread \(threadID) does not belong to the selected Agent Folder: \(workspacePath)"
         }

@@ -219,8 +219,7 @@ class ElementLocationDetector {
             guard let httpResponse = response as? HTTPURLResponse,
                   (200...299).contains(httpResponse.statusCode) else {
                 let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
-                let errorBody = String(data: data, encoding: .utf8) ?? "unknown"
-                print("⚠️ ElementLocationDetector: API error \(statusCode): \(errorBody.prefix(200))")
+                print("⚠️ ElementLocationDetector: API error (HTTP \(statusCode))")
                 return nil
             }
 

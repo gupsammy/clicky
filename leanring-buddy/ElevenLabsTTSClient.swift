@@ -56,9 +56,8 @@ final class ElevenLabsTTSClient {
         }
 
         guard (200...299).contains(httpResponse.statusCode) else {
-            let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
             throw NSError(domain: "ElevenLabsTTS", code: httpResponse.statusCode,
-                          userInfo: [NSLocalizedDescriptionKey: "TTS API error (\(httpResponse.statusCode)): \(errorBody)"])
+                          userInfo: [NSLocalizedDescriptionKey: "TTS API error (HTTP \(httpResponse.statusCode))."])
         }
 
         try Task.checkCancellation()

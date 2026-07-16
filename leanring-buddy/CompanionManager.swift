@@ -95,6 +95,7 @@ final class CompanionManager: ObservableObject {
     private var shortcutTransitionCancellable: AnyCancellable?
     private var voiceStateCancellable: AnyCancellable?
     private var audioPowerCancellable: AnyCancellable?
+    private var screenParametersCancellable: AnyCancellable?
     private var accessibilityCheckTimer: Timer?
     private var pendingKeyboardShortcutStartTask: Task<Void, Never>?
     private var activeFastDictationFocusContext: DictationFocusContext?
@@ -106,6 +107,9 @@ final class CompanionManager: ObservableObject {
     /// Scheduled hide for transient cursor mode — cancelled if the user
     /// speaks again before the delay elapses.
     private var transientHideTask: Task<Void, Never>?
+    /// Distinguishes a superseded response task from the task currently
+    /// exposed through `currentResponseTask` when cancellation completes late.
+    private var currentResponseGeneration = 0
 
     /// True when all three required permissions (accessibility, screen recording,
     /// microphone) are granted. Used by the panel to show a single "all good" state.
@@ -196,6 +200,7 @@ final class CompanionManager: ObservableObject {
         bindVoiceStateObservation()
         bindAudioPowerLevel()
         bindShortcutTransitions()
+        bindScreenParameterChanges()
         // Eagerly touch the Claude API so its TLS warmup handshake completes
         // well before the onboarding demo fires at ~40s into the video.
         _ = claudeAPI
@@ -316,12 +321,17 @@ final class CompanionManager: ObservableObject {
         activeFastDictationInsertionTask = nil
         overlayWindowManager.hideOverlay()
         transientHideTask?.cancel()
+        transientHideTask = nil
+        clearDetectedElementLocation()
 
         currentResponseTask?.cancel()
         currentResponseTask = nil
+        currentResponseGeneration &+= 1
         shortcutTransitionCancellable?.cancel()
         voiceStateCancellable?.cancel()
         audioPowerCancellable?.cancel()
+        screenParametersCancellable?.cancel()
+        screenParametersCancellable = nil
         accessibilityCheckTimer?.invalidate()
         accessibilityCheckTimer = nil
     }
@@ -459,6 +469,21 @@ final class CompanionManager: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] powerLevel in
                 self?.currentAudioPowerLevel = powerLevel
+            }
+    }
+
+    private func bindScreenParameterChanges() {
+        screenParametersCancellable?.cancel()
+        screenParametersCancellable = NotificationCenter.default
+            .publisher(for: NSApplication.didChangeScreenParametersNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self, self.isOverlayVisible else { return }
+                self.clearDetectedElementLocation()
+                self.overlayWindowManager.showOverlay(
+                    onScreens: NSScreen.screens,
+                    companionManager: self
+                )
             }
     }
 
@@ -738,9 +763,12 @@ final class CompanionManager: ObservableObject {
     ) {
         currentResponseTask?.cancel()
         elevenLabsTTSClient.stopPlayback()
+        currentResponseGeneration &+= 1
+        let responseGeneration = currentResponseGeneration
 
         currentResponseTask = Task { [weak self] in
             guard let self else { return }
+            defer { finishResponseTask(responseGeneration: responseGeneration) }
             voiceState = .processing
 
             do {
@@ -851,8 +879,11 @@ final class CompanionManager: ObservableObject {
     private func sendTranscriptToClaudeWithScreenshot(transcript: String) {
         currentResponseTask?.cancel()
         elevenLabsTTSClient.stopPlayback()
+        currentResponseGeneration &+= 1
+        let responseGeneration = currentResponseGeneration
 
         currentResponseTask = Task {
+            defer { finishResponseTask(responseGeneration: responseGeneration) }
             // Stay in processing (spinner) state — no streaming text displayed
             voiceState = .processing
 
@@ -940,10 +971,10 @@ final class CompanionManager: ObservableObject {
 
                     detectedElementScreenLocation = globalLocation
                     detectedElementDisplayFrame = displayFrame
-                    ClickyAnalytics.trackElementPointed(elementLabel: parseResult.elementLabel)
-                    print("🎯 Element pointing: (\(Int(pointCoordinate.x)), \(Int(pointCoordinate.y))) → \"\(parseResult.elementLabel ?? "element")\"")
+                    ClickyAnalytics.trackElementPointed()
+                    print("🎯 Element pointing: (\(Int(pointCoordinate.x)), \(Int(pointCoordinate.y)))")
                 } else {
-                    print("🎯 Element pointing: \(parseResult.elementLabel ?? "no element")")
+                    print("🎯 Element pointing requested without a coordinate")
                 }
 
                 // Save this exchange to conversation history (with the point tag
@@ -970,7 +1001,7 @@ final class CompanionManager: ObservableObject {
                         // speakText returns after player.play() — audio is now playing
                         voiceState = .responding
                     } catch {
-                        ClickyAnalytics.trackTTSError(error: error.localizedDescription)
+                        ClickyAnalytics.trackTTSError(error: error)
                         print("⚠️ ElevenLabs TTS error: \(error)")
                         speakCreditsErrorFallback()
                     }
@@ -978,7 +1009,7 @@ final class CompanionManager: ObservableObject {
             } catch is CancellationError {
                 // User spoke again — response was interrupted
             } catch {
-                ClickyAnalytics.trackResponseError(error: error.localizedDescription)
+                ClickyAnalytics.trackResponseError(error: error)
                 print("⚠️ Companion response error: \(error)")
                 speakCreditsErrorFallback()
             }
@@ -987,6 +1018,17 @@ final class CompanionManager: ObservableObject {
                 voiceState = .idle
                 scheduleTransientHideIfNeeded()
             }
+        }
+    }
+
+    /// Clears only the task that still owns the response slot. This prevents a
+    /// late cancellation from clearing a newer task, while ensuring an empty
+    /// push-to-talk interaction can still hide a transient overlay afterward.
+    private func finishResponseTask(responseGeneration: Int) {
+        guard currentResponseGeneration == responseGeneration else { return }
+        currentResponseTask = nil
+        if case .idle = voiceState {
+            scheduleTransientHideIfNeeded()
         }
     }
 
@@ -1282,9 +1324,9 @@ final class CompanionManager: ObservableObject {
                 detectedElementBubbleText = parseResult.spokenText
                 detectedElementScreenLocation = globalLocation
                 detectedElementDisplayFrame = displayFrame
-                print("🎯 Onboarding demo: pointing at \"\(parseResult.elementLabel ?? "element")\" — \"\(parseResult.spokenText)\"")
+                print("🎯 Onboarding demo: pointing target resolved")
             } catch {
-                print("⚠️ Onboarding demo error: \(error)")
+                print("⚠️ Onboarding demo: vision request failed")
             }
         }
     }

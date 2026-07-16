@@ -563,7 +563,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
                 from: error,
                 fallback: "couldn't start voice input. try again."
             )
-            print("❌ BuddyDictationManager: failed to start recognition session (\(transcriptionProvider.displayName)): \(error)")
+            print("❌ BuddyDictationManager: provider session start failed (\(transcriptionProvider.displayName))")
             let currentDraftCallbacks = draftCallbacks
             resetSessionState()
             currentDraftCallbacks?.dictationSessionFinished()
@@ -666,7 +666,7 @@ final class BuddyDictationManager: NSObject, ObservableObject {
                 shouldSubmitFinalDraft: shouldAutomaticallySubmitFinalDraft
             )
         } else {
-            print("❌ Buddy dictation error (\(transcriptionProvider.displayName)): \(error)")
+            print("❌ BuddyDictationManager: transcription session failed (\(transcriptionProvider.displayName))")
             lastErrorMessage = userFacingErrorMessage(
                 from: error,
                 fallback: "couldn't transcribe that. try again."

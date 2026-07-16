@@ -291,6 +291,56 @@ final class CodexAgentThreadTests: XCTestCase {
         XCTAssertEqual(decodedParameters, notificationParameters)
     }
 
+    func testApprovalResponsesMatchCurrentCodexAppServerSchema() throws {
+        let commandResponse = CodexAgentApprovalDecisionResponse(
+            decision: .acceptForSession
+        )
+        let encodedCommandResponse = try JSONEncoder().encode(commandResponse)
+        let commandValue = try JSONDecoder().decode(
+            CodexJSONValue.self,
+            from: encodedCommandResponse
+        )
+        XCTAssertEqual(
+            try parametersObject(commandValue)["decision"],
+            .string("acceptForSession")
+        )
+
+        let requestedPermissions: CodexJSONValue = .object([
+            "network": .object(["enabled": .boolean(true)]),
+            "fileSystem": .null
+        ])
+        let permissionsResponse = CodexAgentPermissionsApprovalResponse(
+            permissions: requestedPermissions,
+            scope: .turn
+        )
+        let encodedPermissionsResponse = try JSONEncoder().encode(permissionsResponse)
+        let permissionsValue = try JSONDecoder().decode(
+            CodexJSONValue.self,
+            from: encodedPermissionsResponse
+        )
+        let permissionsObject = try parametersObject(permissionsValue)
+        XCTAssertEqual(permissionsObject["permissions"], requestedPermissions)
+        XCTAssertEqual(permissionsObject["scope"], .string("turn"))
+
+        let userInputResponse = CodexAgentUserInputResponse(answers: [
+            "direction": CodexAgentUserInputAnswer(
+                answers: ["Protocol console"]
+            )
+        ])
+        let encodedUserInputResponse = try JSONEncoder().encode(userInputResponse)
+        let userInputValue = try JSONDecoder().decode(
+            CodexJSONValue.self,
+            from: encodedUserInputResponse
+        )
+        let userInputObject = try parametersObject(userInputValue)
+        let answersObject = try parametersObject(userInputObject["answers"])
+        let directionAnswer = try parametersObject(answersObject["direction"])
+        XCTAssertEqual(
+            directionAnswer["answers"],
+            .array([.string("Protocol console")])
+        )
+    }
+
     private func makeClient(
         transport: AgentThreadMockTransport
     ) -> CodexAppServerClient {

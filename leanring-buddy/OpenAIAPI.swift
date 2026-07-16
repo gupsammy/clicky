@@ -115,11 +115,11 @@ class OpenAIAPI {
 
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
-            let responseString = String(data: data, encoding: .utf8) ?? "Unknown error"
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
             throw NSError(
                 domain: "OpenAIAPI",
-                code: (response as? HTTPURLResponse)?.statusCode ?? -1,
-                userInfo: [NSLocalizedDescriptionKey: "API Error: \(responseString)"]
+                code: statusCode,
+                userInfo: [NSLocalizedDescriptionKey: "API error (HTTP \(statusCode))."]
             )
         }
 
