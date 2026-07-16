@@ -22,6 +22,70 @@ final class CodexAppServerCoreTests: XCTestCase {
         )
     }
 
+    func testProcessTransportIgnoresTerminationFromStoppedProcessAfterRestart() throws {
+        let temporaryDirectoryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: temporaryDirectoryURL,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: temporaryDirectoryURL) }
+
+        let executableURL = temporaryDirectoryURL.appendingPathComponent("delayed-exit.sh")
+        let processReadySentinelURL = temporaryDirectoryURL
+            .appendingPathComponent("process-ready")
+        let stoppedProcessSentinelURL = temporaryDirectoryURL
+            .appendingPathComponent("stopped-process-terminated")
+        let script = """
+        #!/bin/sh
+        process_ready_sentinel="$(dirname "$0")/process-ready"
+        stopped_process_sentinel="$(dirname "$0")/stopped-process-terminated"
+        trap '' TERM
+        touch "$process_ready_sentinel"
+        cat >/dev/null
+        sleep 0.2
+        touch "$stopped_process_sentinel"
+        """
+        try Data(script.utf8).write(to: executableURL)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: executableURL.path
+        )
+
+        let transport = CodexAppServerProcessTransport(executableURL: executableURL)
+        try transport.start(onMessage: { _ in }, onTermination: { _ in })
+
+        let processReadyDeadline = Date().addingTimeInterval(2)
+        while !FileManager.default.fileExists(atPath: processReadySentinelURL.path),
+              Date() < processReadyDeadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        guard FileManager.default.fileExists(atPath: processReadySentinelURL.path) else {
+            transport.stop()
+            return XCTFail("The first process did not become ready before the deadline")
+        }
+
+        transport.stop()
+        try transport.start(onMessage: { _ in }, onTermination: { _ in })
+
+        let stoppedProcessDeadline = Date().addingTimeInterval(2)
+        while !FileManager.default.fileExists(atPath: stoppedProcessSentinelURL.path),
+              Date() < stoppedProcessDeadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+
+        guard FileManager.default.fileExists(atPath: stoppedProcessSentinelURL.path) else {
+            transport.stop()
+            return XCTFail("The stopped process did not terminate before the deadline")
+        }
+
+        for _ in 0..<50 {
+            XCTAssertNoThrow(try transport.send(Data("{}".utf8)))
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        transport.stop()
+    }
+
     func testExecutableOverrideIsTheFirstCandidate() {
         let candidateURLs = CodexExecutableLocator.candidateURLs(
             environment: [
@@ -146,6 +210,67 @@ final class CodexAppServerCoreTests: XCTestCase {
         await client.stop()
     }
 
+    func testTransportMessagesAreReducedInDeliveryOrder() async throws {
+        let transport = MockCodexAppServerTransport()
+        let client = makeClient(transport: transport)
+        _ = try await client.connect()
+        for sequenceNumber in 1...40 {
+            transport.emitNotification(
+                method: "test/ordered",
+                params: .object(["sequence": .integer(Int64(sequenceNumber))])
+            )
+        }
+
+        let notifications = try await collectNotifications(
+            from: client.notifications,
+            count: 40
+        )
+        let receivedSequenceNumbers = notifications.compactMap { notification -> Int64? in
+            guard case .object(let parameters) = notification.params,
+                  case .integer(let sequenceNumber) = parameters["sequence"] else {
+                return nil
+            }
+            return sequenceNumber
+        }
+
+        XCTAssertEqual(receivedSequenceNumbers, Array(1...40).map(Int64.init))
+        await client.stop()
+    }
+
+    func testStaleTransportTerminationCannotDisconnectAReconnectedClient() async throws {
+        let transport = MockCodexAppServerTransport()
+        let client = makeClient(transport: transport)
+        _ = try await client.connect()
+        await client.stop()
+        _ = try await client.connect()
+
+        transport.emitPreviousTermination(
+            .processTerminated(exitCode: 15, standardError: "stopped session")
+        )
+        transport.emitNotification(
+            method: "test/current-session",
+            params: .object(["session": .string("current")])
+        )
+
+        let notifications = try await collectNotifications(
+            from: client.notifications,
+            count: 1
+        )
+        XCTAssertEqual(notifications.first?.method, "test/current-session")
+        let connectionState = await client.connectionState
+        XCTAssertEqual(connectionState, .connected)
+        do {
+            try await client.respond(
+                to: .integer(99),
+                with: ["decision": "accept"]
+            )
+        } catch {
+            XCTFail("Expected the reconnected client to remain usable: \(error)")
+        }
+
+        await client.stop()
+    }
+
     private func makeClient(
         transport: MockCodexAppServerTransport,
         requestTimeoutNanoseconds: UInt64 = 15_000_000_000
@@ -160,7 +285,37 @@ final class CodexAppServerCoreTests: XCTestCase {
             requestTimeoutNanoseconds: requestTimeoutNanoseconds
         )
     }
+
+    private func collectNotifications(
+        from notifications: AsyncStream<CodexAppServerNotification>,
+        count: Int,
+        timeoutNanoseconds: UInt64 = 2_000_000_000
+    ) async throws -> [CodexAppServerNotification] {
+        try await withThrowingTaskGroup(of: [CodexAppServerNotification].self) { taskGroup in
+            taskGroup.addTask {
+                var notificationIterator = notifications.makeAsyncIterator()
+                var collectedNotifications: [CodexAppServerNotification] = []
+                while collectedNotifications.count < count,
+                      let notification = await notificationIterator.next() {
+                    collectedNotifications.append(notification)
+                }
+                return collectedNotifications
+            }
+            taskGroup.addTask {
+                try await Task.sleep(nanoseconds: timeoutNanoseconds)
+                throw NotificationCollectionTimeoutError()
+            }
+
+            defer { taskGroup.cancelAll() }
+            guard let collectedNotifications = try await taskGroup.next() else {
+                throw NotificationCollectionTimeoutError()
+            }
+            return collectedNotifications
+        }
+    }
 }
+
+private struct NotificationCollectionTimeoutError: Error {}
 
 final class CodexAppServerLiveTests: XCTestCase {
     func testAuthenticatedChatGPTCodexHandshake() async throws {
@@ -194,6 +349,8 @@ private final class MockCodexAppServerTransport: CodexAppServerTransport, @unche
     private let accountReadError: Bool
     private let ignoreAllRequests: Bool
     private var messageHandler: (@Sendable (Data) -> Void)?
+    private var terminationHandler: (@Sendable (CodexAppServerError) -> Void)?
+    private var previousTerminationHandler: (@Sendable (CodexAppServerError) -> Void)?
 
     private(set) var sentMethods: [String] = []
     private(set) var sentResponseIDs: [CodexAppServerRequestID] = []
@@ -213,6 +370,7 @@ private final class MockCodexAppServerTransport: CodexAppServerTransport, @unche
     ) throws {
         stateLock.lock()
         messageHandler = onMessage
+        terminationHandler = onTermination
         didStop = false
         stateLock.unlock()
     }
@@ -284,8 +442,17 @@ private final class MockCodexAppServerTransport: CodexAppServerTransport, @unche
     func stop() {
         stateLock.lock()
         didStop = true
+        previousTerminationHandler = terminationHandler
         messageHandler = nil
+        terminationHandler = nil
         stateLock.unlock()
+    }
+
+    func emitPreviousTermination(_ error: CodexAppServerError) {
+        stateLock.lock()
+        let previousTerminationHandler = previousTerminationHandler
+        stateLock.unlock()
+        previousTerminationHandler?(error)
     }
 
     func emitNotification(method: String, params: CodexJSONValue) {

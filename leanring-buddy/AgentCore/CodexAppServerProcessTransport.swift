@@ -132,17 +132,17 @@ final class CodexAppServerProcessTransport: CodexAppServerTransport, @unchecked 
         standardOutputPipe.fileHandleForReading.readabilityHandler = { [weak self] fileHandle in
             let availableData = fileHandle.availableData
             guard !availableData.isEmpty else { return }
-            self?.receiveStandardOutput(availableData)
+            self?.receiveStandardOutput(availableData, from: fileHandle)
         }
 
         standardErrorPipe.fileHandleForReading.readabilityHandler = { [weak self] fileHandle in
             let availableData = fileHandle.availableData
             guard !availableData.isEmpty else { return }
-            self?.receiveStandardError(availableData)
+            self?.receiveStandardError(availableData, from: fileHandle)
         }
 
         process.terminationHandler = { [weak self] terminatedProcess in
-            self?.processDidTerminate(exitCode: terminatedProcess.terminationStatus)
+            self?.processDidTerminate(terminatedProcess)
         }
 
         do {
@@ -193,8 +193,15 @@ final class CodexAppServerProcessTransport: CodexAppServerTransport, @unchecked 
         }
     }
 
-    private func receiveStandardOutput(_ incomingData: Data) {
+    private func receiveStandardOutput(
+        _ incomingData: Data,
+        from originatingFileHandle: FileHandle
+    ) {
         stateLock.lock()
+        guard standardOutputPipe?.fileHandleForReading === originatingFileHandle else {
+            stateLock.unlock()
+            return
+        }
         let completeMessages = jsonLineFramer.append(incomingData)
         let messageHandler = onMessage
         stateLock.unlock()
@@ -204,8 +211,15 @@ final class CodexAppServerProcessTransport: CodexAppServerTransport, @unchecked 
         }
     }
 
-    private func receiveStandardError(_ incomingData: Data) {
+    private func receiveStandardError(
+        _ incomingData: Data,
+        from originatingFileHandle: FileHandle
+    ) {
         stateLock.lock()
+        guard standardErrorPipe?.fileHandleForReading === originatingFileHandle else {
+            stateLock.unlock()
+            return
+        }
         let availableByteCount = Self.maximumCapturedStandardErrorBytes - standardErrorData.count
         if availableByteCount > 0 {
             standardErrorData.append(incomingData.prefix(availableByteCount))
@@ -213,8 +227,12 @@ final class CodexAppServerProcessTransport: CodexAppServerTransport, @unchecked 
         stateLock.unlock()
     }
 
-    private func processDidTerminate(exitCode: Int32) {
+    private func processDidTerminate(_ terminatedProcess: Process) {
         stateLock.lock()
+        guard process === terminatedProcess else {
+            stateLock.unlock()
+            return
+        }
         let shouldReportTermination = !isStoppingIntentionally
         let terminationHandler = onTermination
         let capturedStandardError = String(data: standardErrorData, encoding: .utf8) ?? ""
@@ -234,7 +252,7 @@ final class CodexAppServerProcessTransport: CodexAppServerTransport, @unchecked 
         if shouldReportTermination {
             terminationHandler?(
                 .processTerminated(
-                    exitCode: exitCode,
+                    exitCode: terminatedProcess.terminationStatus,
                     standardError: capturedStandardError
                 )
             )

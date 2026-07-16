@@ -11,13 +11,28 @@ actor CodexAppServerClient {
     nonisolated let notifications: AsyncStream<CodexAppServerNotification>
     nonisolated let serverRequests: AsyncStream<CodexAppServerRequest>
 
+    private enum TransportEvent: Sendable {
+        case message(generation: UInt64, data: Data)
+        case termination(generation: UInt64, error: CodexAppServerError)
+
+        var generation: UInt64 {
+            switch self {
+            case .message(let generation, _), .termination(let generation, _):
+                return generation
+            }
+        }
+    }
+
     private let transport: CodexAppServerTransport
     private let clientInfo: CodexAppServerClientInfo
     private let jsonEncoder = JSONEncoder()
     private let jsonDecoder = JSONDecoder()
     private let notificationContinuation: AsyncStream<CodexAppServerNotification>.Continuation
     private let serverRequestContinuation: AsyncStream<CodexAppServerRequest>.Continuation
+    private let transportEvents: AsyncStream<TransportEvent>
+    private let transportEventContinuation: AsyncStream<TransportEvent>.Continuation
     private let requestTimeoutNanoseconds: UInt64
+    private var transportEventMonitoringTask: Task<Void, Never>?
 
     private struct PendingRequest {
         let continuation: CheckedContinuation<CodexJSONValue, Error>
@@ -26,6 +41,8 @@ actor CodexAppServerClient {
 
     private var nextRequestID: Int64 = 1
     private var pendingRequests: [CodexAppServerRequestID: PendingRequest] = [:]
+    private var nextTransportGeneration: UInt64 = 1
+    private var activeTransportGeneration: UInt64?
 
     private(set) var connectionState: CodexAppServerConnectionState = .disconnected
 
@@ -40,6 +57,9 @@ actor CodexAppServerClient {
         let serverRequestStreamPair = AsyncStream<CodexAppServerRequest>.makeStream(
             bufferingPolicy: .unbounded
         )
+        let transportEventStreamPair = AsyncStream<TransportEvent>.makeStream(
+            bufferingPolicy: .unbounded
+        )
 
         self.transport = transport
         self.clientInfo = clientInfo
@@ -47,13 +67,17 @@ actor CodexAppServerClient {
         self.notificationContinuation = notificationStreamPair.continuation
         self.serverRequests = serverRequestStreamPair.stream
         self.serverRequestContinuation = serverRequestStreamPair.continuation
+        self.transportEvents = transportEventStreamPair.stream
+        self.transportEventContinuation = transportEventStreamPair.continuation
         self.requestTimeoutNanoseconds = requestTimeoutNanoseconds
     }
 
     deinit {
+        transportEventMonitoringTask?.cancel()
         transport.stop()
         notificationContinuation.finish()
         serverRequestContinuation.finish()
+        transportEventContinuation.finish()
     }
 
     static func makeLive(
@@ -84,18 +108,22 @@ actor CodexAppServerClient {
         }
 
         connectionState = .connecting
+        let transportGeneration = nextTransportGeneration
+        nextTransportGeneration &+= 1
+        activeTransportGeneration = transportGeneration
+        startMonitoringTransportEventsIfNeeded()
 
         do {
             try transport.start(
-                onMessage: { [weak self] messageData in
-                    Task {
-                        await self?.receive(messageData)
-                    }
+                onMessage: { [transportEventContinuation] messageData in
+                    transportEventContinuation.yield(
+                        .message(generation: transportGeneration, data: messageData)
+                    )
                 },
-                onTermination: { [weak self] terminationError in
-                    Task {
-                        await self?.transportDidTerminate(with: terminationError)
-                    }
+                onTermination: { [transportEventContinuation] terminationError in
+                    transportEventContinuation.yield(
+                        .termination(generation: transportGeneration, error: terminationError)
+                    )
                 }
             )
 
@@ -117,12 +145,18 @@ actor CodexAppServerClient {
                 parameters: CodexAppServerAccountReadParameters()
             )
 
+            guard activeTransportGeneration == transportGeneration else {
+                throw CodexAppServerError.notConnected
+            }
             connectionState = .connected
             return CodexAppServerSession(
                 initialization: initializationResponse,
                 account: accountResponse
             )
         } catch {
+            if activeTransportGeneration == transportGeneration {
+                activeTransportGeneration = nil
+            }
             failPendingRequests(with: error)
             transport.stop()
             connectionState = .disconnected
@@ -179,6 +213,7 @@ actor CodexAppServerClient {
     func stop() {
         guard connectionState != .disconnected else { return }
 
+        activeTransportGeneration = nil
         transport.stop()
         failPendingRequests(with: CodexAppServerError.notConnected)
         connectionState = .disconnected
@@ -292,6 +327,26 @@ actor CodexAppServerClient {
         }
     }
 
+    private func startMonitoringTransportEventsIfNeeded() {
+        guard transportEventMonitoringTask == nil else { return }
+        transportEventMonitoringTask = Task { [weak self, transportEvents] in
+            for await transportEvent in transportEvents {
+                guard !Task.isCancelled else { return }
+                await self?.reduceTransportEvent(transportEvent)
+            }
+        }
+    }
+
+    private func reduceTransportEvent(_ transportEvent: TransportEvent) {
+        guard transportEvent.generation == activeTransportGeneration else { return }
+        switch transportEvent {
+        case .message(_, let messageData):
+            receive(messageData)
+        case .termination(_, let terminationError):
+            transportDidTerminate(with: terminationError)
+        }
+    }
+
     private func requestDidTimeOut(
         requestID: CodexAppServerRequestID,
         method: String
@@ -301,11 +356,13 @@ actor CodexAppServerClient {
     }
 
     private func transportDidTerminate(with terminationError: CodexAppServerError) {
+        activeTransportGeneration = nil
         failPendingRequests(with: terminationError)
         connectionState = .disconnected
     }
 
     private func handleFatalProtocolError(_ protocolError: CodexAppServerError) {
+        activeTransportGeneration = nil
         failPendingRequests(with: protocolError)
         transport.stop()
         connectionState = .disconnected
