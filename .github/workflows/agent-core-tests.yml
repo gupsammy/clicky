@@ -1,0 +1,19 @@
+name: Agent Core Tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test Codex app-server core
+        run: swift test -Xswiftc -warnings-as-errors
