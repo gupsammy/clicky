@@ -145,6 +145,49 @@ struct CodexAgentTaskSnapshot: Codable, Equatable, Sendable {
     let lastEventSequence: Int64
 }
 
+enum CodexAgentAttentionKind: Equatable, Sendable {
+    case approval
+    case userInput
+}
+
+struct CodexAgentAttentionRequest: Equatable, Sendable {
+    let threadID: String
+    let requestID: CodexAppServerRequestID
+    let kind: CodexAgentAttentionKind
+    let message: String
+
+    var spokenAnnouncement: String {
+        "The agent needs your attention."
+    }
+}
+
+extension CodexAgentTaskSnapshot {
+    var pendingAttentionRequest: CodexAgentAttentionRequest? {
+        if status == .waitingForInput,
+           let userInputRequest = pendingUserInputs.first,
+           let question = userInputRequest.questions.first {
+            return CodexAgentAttentionRequest(
+                threadID: threadID,
+                requestID: userInputRequest.requestID,
+                kind: .userInput,
+                message: question.question
+            )
+        }
+
+        if status == .waitingForApproval,
+           let approval = pendingApprovals.first {
+            return CodexAgentAttentionRequest(
+                threadID: threadID,
+                requestID: approval.requestID,
+                kind: .approval,
+                message: "\(title) needs approval: \(approval.summary)"
+            )
+        }
+
+        return nil
+    }
+}
+
 struct CodexAgentMessageDeltaNotification: Codable, Equatable, Sendable {
     let threadId: String
     let turnId: String

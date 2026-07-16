@@ -24,8 +24,61 @@ struct CompanionScreenCapture {
     let screenshotHeightInPixels: Int
 }
 
+struct CompanionScreenCaptureAttachmentSet {
+    let imagePaths: [String]
+    let promptDescription: String
+
+    private let directoryURL: URL
+
+    init(screenCaptures: [CompanionScreenCapture]) throws {
+        let directoryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("clicky-screen-captures", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directoryURL,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+
+        do {
+            var imagePaths: [String] = []
+            var promptLines: [String] = []
+            for (captureIndex, screenCapture) in screenCaptures.enumerated() {
+                let imageURL = directoryURL
+                    .appendingPathComponent("screen-\(captureIndex + 1).jpg")
+                try screenCapture.imageData.write(to: imageURL, options: .atomic)
+                try FileManager.default.setAttributes(
+                    [.posixPermissions: 0o600],
+                    ofItemAtPath: imageURL.path
+                )
+                imagePaths.append(imageURL.path)
+                promptLines.append(
+                    "Image \(captureIndex + 1): \(screenCapture.label) "
+                        + "(\(screenCapture.screenshotWidthInPixels)x"
+                        + "\(screenCapture.screenshotHeightInPixels) pixels, "
+                        + "display ID \(screenCapture.displayIdentifier))"
+                )
+            }
+
+            self.imagePaths = imagePaths
+            self.promptDescription = promptLines.joined(separator: "\n")
+            self.directoryURL = directoryURL
+        } catch {
+            try? FileManager.default.removeItem(at: directoryURL)
+            throw error
+        }
+    }
+
+    func cleanup() {
+        try? FileManager.default.removeItem(at: directoryURL)
+    }
+}
+
 @MainActor
 enum CompanionScreenCaptureUtility {
+    private static let minimumMeaningfulSpatialTraceDistance: Double = 12
+    private static let minimumSpatialHoverApproachDistance: Double = 4
+    private static let minimumMeaningfulSpatialHoverDuration: TimeInterval = 0.65
 
     static func captureFocusedDisplayAsJPEG(
         focusedElementFrameInCoreGraphicsCoordinates: CGRect
@@ -148,6 +201,61 @@ enum CompanionScreenCaptureUtility {
         return capturedScreens
     }
 
+    static func spatialGroundingPromptBlock(
+        for spatialCursorTrace: SpatialCursorTrace?,
+        screenCaptures: [CompanionScreenCapture]
+    ) -> String? {
+        guard let spatialCursorTrace,
+              spatialCursorTrace.samples.count >= 2,
+              let traceDisplayIdentifier = spatialCursorTrace.samples.first?
+                .displayIdentifier,
+              spatialCursorTrace.samples.allSatisfy({
+                  $0.displayIdentifier == traceDisplayIdentifier
+              }),
+              let matchingCaptureIndex = screenCaptures.firstIndex(where: {
+                  $0.displayIdentifier == traceDisplayIdentifier
+              }) else {
+            return nil
+        }
+
+        let matchingCapture = screenCaptures[matchingCaptureIndex]
+        let screenshotGeometry = SpatialScreenshotGeometry(
+            displayIdentifier: matchingCapture.displayIdentifier,
+            globalDisplayFrame: SpatialInteractionRect(
+                x: matchingCapture.displayFrameInCoreGraphicsCoordinates.origin.x,
+                y: matchingCapture.displayFrameInCoreGraphicsCoordinates.origin.y,
+                width: matchingCapture.displayFrameInCoreGraphicsCoordinates.width,
+                height: matchingCapture.displayFrameInCoreGraphicsCoordinates.height
+            ),
+            screenshotWidth: Double(matchingCapture.screenshotWidthInPixels),
+            screenshotHeight: Double(matchingCapture.screenshotHeightInPixels),
+            globalCoordinateOrigin: .topLeft
+        )
+        guard let traceSummary = spatialCursorTrace.summary(
+            for: screenshotGeometry
+        ) else {
+            return nil
+        }
+        let traceDistance = totalDistance(of: spatialCursorTrace.samples)
+        let hasMeaningfulTravel = traceDistance
+            >= minimumMeaningfulSpatialTraceDistance
+        let hasDeliberateHover = traceDistance
+            >= minimumSpatialHoverApproachDistance
+            && (traceSummary.hover?.duration ?? 0)
+                >= minimumMeaningfulSpatialHoverDuration
+        guard hasMeaningfulTravel || hasDeliberateHover else {
+            return nil
+        }
+
+        return """
+        <cursor-spatial-grounding>
+        The user intentionally moved their pointer to show where this request applies. This is attention context only, not permission to click or act.
+        The trace refers to attached Image \(matchingCaptureIndex + 1).
+        \(traceSummary.modelDescription)
+        </cursor-spatial-grounding>
+        """
+    }
+
     private static func ownAppWindows(
         in content: SCShareableContent
     ) -> [SCWindow] {
@@ -173,6 +281,18 @@ enum CompanionScreenCaptureUtility {
             width: CGFloat(display.width),
             height: CGFloat(display.height)
         )
+    }
+
+    private static func totalDistance(
+        of samples: [SpatialCursorSample]
+    ) -> Double {
+        zip(samples, samples.dropFirst()).reduce(0) { distance, samplePair in
+            let deltaX = samplePair.1.globalPoint.x
+                - samplePair.0.globalPoint.x
+            let deltaY = samplePair.1.globalPoint.y
+                - samplePair.0.globalPoint.y
+            return distance + hypot(deltaX, deltaY)
+        }
     }
 
     private static func captureDisplayAsJPEG(

@@ -56,6 +56,24 @@ import Testing
     }
 }
 
+@Test func requestBuildsCodexPromptWithoutEmbeddingScreenshotData() throws {
+    let request = try ScreenAwareCompositionRequest(
+        spokenInstruction: "reply politely",
+        applicationName: "Mail",
+        windowTitle: "Project update",
+        selectedText: "Can you ship today?",
+        textBeforeSelection: "Sam wrote:",
+        textAfterSelection: "Thanks",
+        screenshotJPEGData: Data([0xFF, 0xD8, 0xFF])
+    )
+
+    #expect(request.codexTextPrompt.contains("Spoken instruction: reply politely"))
+    #expect(request.codexTextPrompt.contains("Application:\n<field-context>\nMail"))
+    #expect(request.codexTextPrompt.contains("Selected text:\n<field-context>\nCan you ship today?"))
+    #expect(request.codexTextPrompt.contains("Return only the exact text to insert."))
+    #expect(!request.codexTextPrompt.contains(request.screenshotJPEGBase64))
+}
+
 @Test func responseRejectsEmptyCompositions() throws {
     let response = try ScreenAwareCompositionResponse.decode(
         data: Data(#"{"text":"  Ready to ship.  "}"#.utf8)

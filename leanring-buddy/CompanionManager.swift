@@ -43,10 +43,19 @@ final class CompanionManager: ObservableObject {
     /// Custom speech bubble text for the pointing animation. When set,
     /// BlueCursorView uses this instead of a random pointer phrase.
     @Published var detectedElementBubbleText: String?
+    @Published private(set) var agentAttentionMessage: String?
     @Published private(set) var spatialAnnotations: [CompanionSpatialAnnotation] = []
     @Published private(set) var spatialAnnotationSceneGeneration = 0
+    @Published private(set) var spatialCursorTraceSamples: [SpatialCursorSample] = []
+    @Published private(set) var activeSpatialInteractionPresentation:
+        CompanionSpatialInteractionPresentation?
     private var spatialAnnotationDismissTask: Task<Void, Never>?
     private var spatialContextGeneration = 0
+    private var activeSpatialCursorTrace: SpatialCursorTrace?
+    private var pendingSpatialCursorTrace: SpatialCursorTrace?
+    private var spatialInteractionProgress: SpatialInteractionProgress = .waiting
+    private var spatialInteractionHoverTask: Task<Void, Never>?
+    private var spatialInteractionHoverPoint: SpatialInteractionPoint?
 
     // MARK: - Onboarding Video State (shared across all screen overlays)
 
@@ -75,12 +84,20 @@ final class CompanionManager: ObservableObject {
     private let openAIScreenCompositionClient = OpenAIScreenCompositionClient()
     private let agentPresentationModel: AgentPresentationModel
     private let systemSpeechSynthesizer = NSSpeechSynthesizer()
+    private var codexCompanionService: CodexCompanionService?
     // Response text is now displayed inline on the cursor overlay via
     // streamingResponseText, so no separate response overlay manager is needed.
 
-    /// Base URL for the Cloudflare Worker proxy. All API requests route
-    /// through this so keys never ship in the app binary.
-    private static let workerBaseURL = "https://clicky-proxy.sg-claude-git.workers.dev"
+    /// Optional legacy Worker route. Subscription-backed Codex app-server is
+    /// the primary companion path; the Worker remains a configured fallback.
+    private static let workerBaseURL = AppBundleConfiguration
+        .stringValue(forKey: "ClickyAPIProxyBaseURL")
+        ?? "https://your-worker-name.your-subdomain.workers.dev"
+
+    private var isLegacyWorkerConfigured: Bool {
+        !Self.workerBaseURL.contains("your-worker-name")
+            && ClickyProxyAuthorization.isConfigured
+    }
 
     private lazy var claudeAPI: ClaudeAPI = {
         return ClaudeAPI(proxyURL: "\(Self.workerBaseURL)/chat", model: selectedModel)
@@ -99,6 +116,10 @@ final class CompanionManager: ObservableObject {
     private var currentResponseTask: Task<Void, Never>?
 
     private var shortcutTransitionCancellable: AnyCancellable?
+    private var agentAttentionCancellable: AnyCancellable?
+    private var agentAttentionSpeechTask: Task<Void, Never>?
+    private var spatialCursorSampleCancellable: AnyCancellable?
+    private var spatialInteractionEventCancellable: AnyCancellable?
     private var voiceStateCancellable: AnyCancellable?
     private var audioPowerCancellable: AnyCancellable?
     private var screenParametersCancellable: AnyCancellable?
@@ -167,6 +188,7 @@ final class CompanionManager: ObservableObject {
             overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
             isOverlayVisible = true
         } else {
+            clearSpatialCursorTrace()
             overlayWindowManager.hideOverlay()
             isOverlayVisible = false
         }
@@ -212,6 +234,9 @@ final class CompanionManager: ObservableObject {
         bindVoiceStateObservation()
         bindAudioPowerLevel()
         bindShortcutTransitions()
+        bindAgentAttention()
+        bindSpatialCursorSamples()
+        bindSpatialInteractionEvents()
         bindScreenParameterChanges()
         bindSpatialContextChanges()
         // Eagerly touch the Claude API so its TLS warmup handshake completes
@@ -329,11 +354,63 @@ final class CompanionManager: ObservableObject {
         spatialAnnotationSceneGeneration &+= 1
     }
 
+    func clearSpatialCursorTrace() {
+        activeSpatialCursorTrace = nil
+        pendingSpatialCursorTrace = nil
+        if !spatialCursorTraceSamples.isEmpty {
+            spatialCursorTraceSamples = []
+        }
+    }
+
+    func clearSpatialInteractionWalkthrough() {
+        globalPushToTalkShortcutMonitor
+            .setSpatialInteractionObservationEnabled(false)
+        spatialInteractionHoverTask?.cancel()
+        spatialInteractionHoverTask = nil
+        spatialInteractionHoverPoint = nil
+        spatialInteractionProgress = .waiting
+        activeSpatialInteractionPresentation = nil
+    }
+
+    private func beginSpatialCursorTrace() {
+        clearSpatialCursorTrace()
+        activeSpatialCursorTrace = SpatialCursorTrace()
+    }
+
+    private func recordSpatialCursorSample(
+        _ spatialCursorSample: SpatialCursorSample
+    ) {
+        guard var activeSpatialCursorTrace else { return }
+        activeSpatialCursorTrace.record(spatialCursorSample)
+        self.activeSpatialCursorTrace = activeSpatialCursorTrace
+        spatialCursorTraceSamples = activeSpatialCursorTrace.samples
+    }
+
+    private func finishSpatialCursorTrace() {
+        guard let activeSpatialCursorTrace else { return }
+        self.activeSpatialCursorTrace = nil
+        pendingSpatialCursorTrace = activeSpatialCursorTrace
+        spatialCursorTraceSamples = activeSpatialCursorTrace.samples
+    }
+
+    private func takePendingSpatialCursorTrace() -> SpatialCursorTrace? {
+        let spatialCursorTrace = pendingSpatialCursorTrace
+            ?? activeSpatialCursorTrace
+        clearSpatialCursorTrace()
+        return spatialCursorTrace
+    }
+
     func stop() {
         globalPushToTalkShortcutMonitor.stop()
         buddyDictationManager.cancelCurrentDictation()
         elevenLabsTTSClient.stopPlayback()
         systemSpeechSynthesizer.stopSpeaking()
+        if let codexCompanionService {
+            Task {
+                await codexCompanionService.stop()
+            }
+            self.codexCompanionService = nil
+        }
         activeFastDictationFocusContext = nil
         fastDictationStartedAt = nil
         activeScreenAwareDictationFocusContext = nil
@@ -346,11 +423,22 @@ final class CompanionManager: ObservableObject {
         transientHideTask = nil
         clearDetectedElementLocation()
         clearSpatialAnnotations()
+        clearSpatialCursorTrace()
+        clearSpatialInteractionWalkthrough()
 
         currentResponseTask?.cancel()
         currentResponseTask = nil
         currentResponseGeneration &+= 1
         shortcutTransitionCancellable?.cancel()
+        agentAttentionCancellable?.cancel()
+        agentAttentionCancellable = nil
+        agentAttentionSpeechTask?.cancel()
+        agentAttentionSpeechTask = nil
+        agentAttentionMessage = nil
+        spatialCursorSampleCancellable?.cancel()
+        spatialCursorSampleCancellable = nil
+        spatialInteractionEventCancellable?.cancel()
+        spatialInteractionEventCancellable = nil
         voiceStateCancellable?.cancel()
         audioPowerCancellable?.cancel()
         screenParametersCancellable?.cancel()
@@ -509,6 +597,8 @@ final class CompanionManager: ObservableObject {
                 self.spatialContextGeneration &+= 1
                 self.clearDetectedElementLocation()
                 self.clearSpatialAnnotations()
+                self.clearSpatialCursorTrace()
+                self.clearSpatialInteractionWalkthrough()
                 guard self.isOverlayVisible else { return }
                 self.overlayWindowManager.showOverlay(
                     onScreens: NSScreen.screens,
@@ -539,6 +629,8 @@ final class CompanionManager: ObservableObject {
         spatialContextGeneration &+= 1
         clearDetectedElementLocation()
         clearSpatialAnnotations()
+        clearSpatialCursorTrace()
+        clearSpatialInteractionWalkthrough()
     }
 
     private func bindVoiceStateObservation() {
@@ -584,6 +676,126 @@ final class CompanionManager: ObservableObject {
             }
     }
 
+    private func bindSpatialCursorSamples() {
+        spatialCursorSampleCancellable = globalPushToTalkShortcutMonitor
+            .spatialCursorSamplePublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] spatialCursorSample in
+                self?.recordSpatialCursorSample(spatialCursorSample)
+            }
+    }
+
+    private func bindSpatialInteractionEvents() {
+        spatialInteractionEventCancellable = globalPushToTalkShortcutMonitor
+            .spatialInteractionEventPublisher
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] spatialInteractionEvent in
+                self?.handleSpatialInteractionEvent(spatialInteractionEvent)
+            }
+    }
+
+    private func handleSpatialInteractionEvent(
+        _ spatialInteractionEvent: SpatialInteractionObservedPointerEvent
+    ) {
+        guard let activeSpatialInteractionPresentation,
+              spatialInteractionProgress == .waiting else {
+            return
+        }
+
+        switch spatialInteractionEvent {
+        case .leftMouseDown(let spatialCursorSample):
+            cancelSpatialInteractionHover()
+            guard let screenshotPoint = activeSpatialInteractionPresentation
+                .screenshotGeometry
+                .screenshotPoint(for: spatialCursorSample) else {
+                return
+            }
+            applySpatialInteractionEvent(
+                .click(
+                    displayIdentifier: spatialCursorSample.displayIdentifier,
+                    screenshotPoint: screenshotPoint
+                ),
+                presentation: activeSpatialInteractionPresentation
+            )
+        case .pointerMoved(let spatialCursorSample):
+            guard case let .hover(minimumDuration) =
+                    activeSpatialInteractionPresentation.step.kind else {
+                return
+            }
+            guard let screenshotPoint = activeSpatialInteractionPresentation
+                .screenshotGeometry
+                .screenshotPoint(for: spatialCursorSample),
+                  activeSpatialInteractionPresentation.step.region
+                    .contains(screenshotPoint) else {
+                cancelSpatialInteractionHover()
+                return
+            }
+
+            spatialInteractionHoverPoint = screenshotPoint
+            guard spatialInteractionHoverTask == nil else { return }
+            let expectedStep = activeSpatialInteractionPresentation.step
+            spatialInteractionHoverTask = Task {
+                do {
+                    try await Task.sleep(for: .seconds(minimumDuration))
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled,
+                      let currentPresentation =
+                        self.activeSpatialInteractionPresentation,
+                      currentPresentation.step == expectedStep,
+                      let spatialInteractionHoverPoint =
+                        self.spatialInteractionHoverPoint else {
+                    return
+                }
+                self.spatialInteractionHoverTask = nil
+                self.applySpatialInteractionEvent(
+                    .hover(
+                        displayIdentifier: expectedStep.displayIdentifier,
+                        screenshotPoint: spatialInteractionHoverPoint,
+                        duration: minimumDuration
+                    ),
+                    presentation: currentPresentation
+                )
+            }
+        }
+    }
+
+    private func cancelSpatialInteractionHover() {
+        spatialInteractionHoverTask?.cancel()
+        spatialInteractionHoverTask = nil
+        spatialInteractionHoverPoint = nil
+    }
+
+    private func applySpatialInteractionEvent(
+        _ spatialInteractionEvent: SpatialInteractionEvent,
+        presentation: CompanionSpatialInteractionPresentation
+    ) {
+        let transition = SpatialInteractionReducer.reduce(
+            progress: spatialInteractionProgress,
+            step: presentation.step,
+            event: spatialInteractionEvent
+        )
+        spatialInteractionProgress = transition.progress
+        guard transition.didAdvance else { return }
+        completeSpatialInteractionStep(presentation)
+    }
+
+    private func completeSpatialInteractionStep(
+        _ completedPresentation: CompanionSpatialInteractionPresentation
+    ) {
+        globalPushToTalkShortcutMonitor
+            .setSpatialInteractionObservationEnabled(false)
+        cancelSpatialInteractionHover()
+        activeSpatialInteractionPresentation = nil
+        spatialInteractionProgress = .completed
+        transientHideTask?.cancel()
+        transientHideTask = nil
+        continueSpatialInteractionWalkthrough(
+            afterCompleting: completedPresentation.label
+        )
+    }
+
     private func handleShortcutEvent(_ shortcutEvent: BuddyPushToTalkShortcut.ShortcutEvent) {
         switch shortcutEvent.kind {
         case .companion:
@@ -606,9 +818,10 @@ final class CompanionManager: ObservableObject {
             screenAwareDictationStartedAt = nil
             // Don't register push-to-talk while the onboarding video is playing
             guard !showOnboardingVideo else { return }
+            clearSpatialInteractionWalkthrough()
+            beginSpatialCursorTrace()
 
-            if openAIScreenCompositionClient.isConfigured,
-               let focusContext = try? focusedTextInsertionService.captureFocusContext(),
+            if let focusContext = try? focusedTextInsertionService.captureFocusContext(),
                let focusedTextContext = try? focusedTextInsertionService
                     .screenAwareContext(for: focusContext),
                focusedTextContext.focusedElementFrameInCoreGraphicsCoordinates != nil {
@@ -633,6 +846,8 @@ final class CompanionManager: ObservableObject {
 
             // Cancel any in-progress response and TTS from a previous utterance
             currentResponseTask?.cancel()
+            agentAttentionSpeechTask?.cancel()
+            agentAttentionSpeechTask = nil
             elevenLabsTTSClient.stopPlayback()
             systemSpeechSynthesizer.stopSpeaking()
             clearDetectedElementLocation()
@@ -675,18 +890,23 @@ final class CompanionManager: ObservableObject {
                         switch spokenRequestRoute {
                         case .agent(let agentPrompt):
                             ClickyAnalytics.trackSpokenAgentTaskRouted(prompt: agentPrompt)
+                            self.clearSpatialCursorTrace()
                             self.routeSpokenRequestToAgent(prompt: agentPrompt)
                         case .agentFollowUp(let followUpPrompt):
+                            self.clearSpatialCursorTrace()
                             self.routeSpokenFollowUpToAgent(prompt: followUpPrompt)
                         case .agentStatus:
+                            self.clearSpatialCursorTrace()
                             self.routeSpokenAgentStatus()
                         case .invalidAgentTrigger:
                             ClickyAnalytics.trackSpokenAgentTriggerInvalid()
+                            self.clearSpatialCursorTrace()
                             self.reportSpokenRoutingFailure(
                                 "Say what the agent should do after 'agent'."
                             )
                         case .screenAwareComposition:
                             guard let focusContext = self.activeScreenAwareDictationFocusContext else {
+                                self.clearSpatialCursorTrace()
                                 self.reportSpokenRoutingFailure(
                                     "The focused text field is no longer available."
                                 )
@@ -702,11 +922,15 @@ final class CompanionManager: ObservableObject {
                                 spokenInstruction: finalTranscript,
                                 focusContext: focusContext,
                                 focusedTextContext: focusedTextContext,
-                                startedAt: self.screenAwareDictationStartedAt
+                                startedAt: self.screenAwareDictationStartedAt,
+                                spatialCursorTrace: self.takePendingSpatialCursorTrace()
                             )
                         case .companion:
                             ClickyAnalytics.trackUserMessageSent(transcript: finalTranscript)
-                            self.sendTranscriptToClaudeWithScreenshot(transcript: finalTranscript)
+                            self.sendTranscriptToClaudeWithScreenshot(
+                                transcript: finalTranscript,
+                                spatialCursorTrace: self.takePendingSpatialCursorTrace()
+                            )
                         }
                         self.activeScreenAwareDictationFocusContext = nil
                         self.activeScreenAwareFocusedTextContext = nil
@@ -716,6 +940,7 @@ final class CompanionManager: ObservableObject {
                         self?.activeScreenAwareDictationFocusContext = nil
                         self?.activeScreenAwareFocusedTextContext = nil
                         self?.screenAwareDictationStartedAt = nil
+                        self?.clearSpatialCursorTrace()
                     }
                 )
             }
@@ -731,6 +956,7 @@ final class CompanionManager: ObservableObject {
             }
             pendingKeyboardShortcutStartTask?.cancel()
             pendingKeyboardShortcutStartTask = nil
+            finishSpatialCursorTrace()
             buddyDictationManager.stopPushToTalkFromKeyboardShortcut()
         case .none:
             break
@@ -743,9 +969,59 @@ final class CompanionManager: ObservableObject {
         systemSpeechSynthesizer.stopSpeaking()
         clearDetectedElementLocation()
         clearSpatialAnnotations()
+        clearSpatialInteractionWalkthrough()
         agentPresentationModel.startSpokenTask(prompt: prompt)
         voiceState = .idle
         scheduleTransientHideIfNeeded()
+    }
+
+    private func bindAgentAttention() {
+        agentAttentionCancellable = agentPresentationModel.$agentAttentionRequest
+            .removeDuplicates()
+            .sink { [weak self] attentionRequest in
+                self?.handleAgentAttentionRequest(attentionRequest)
+            }
+    }
+
+    private func handleAgentAttentionRequest(
+        _ attentionRequest: CodexAgentAttentionRequest?
+    ) {
+        agentAttentionSpeechTask?.cancel()
+        agentAttentionSpeechTask = nil
+        agentAttentionMessage = attentionRequest?.message
+
+        guard let attentionRequest else {
+            scheduleTransientHideIfNeeded()
+            return
+        }
+
+        transientHideTask?.cancel()
+        transientHideTask = nil
+        if !isOverlayVisible {
+            overlayWindowManager.hasShownOverlayBefore = true
+            overlayWindowManager.showOverlay(
+                onScreens: NSScreen.screens,
+                companionManager: self
+            )
+            isOverlayVisible = true
+        }
+
+        agentAttentionSpeechTask = Task { [weak self] in
+            guard let self else { return }
+            while true {
+                if case .idle = self.voiceState {
+                    break
+                }
+                do {
+                    try await Task.sleep(for: .milliseconds(200))
+                } catch {
+                    return
+                }
+            }
+            await self.speakWithSystemVoice(attentionRequest.spokenAnnouncement)
+            guard !Task.isCancelled else { return }
+            self.voiceState = .idle
+        }
     }
 
     private func routeSpokenFollowUpToAgent(prompt: String) {
@@ -754,6 +1030,7 @@ final class CompanionManager: ObservableObject {
         systemSpeechSynthesizer.stopSpeaking()
         clearDetectedElementLocation()
         clearSpatialAnnotations()
+        clearSpatialInteractionWalkthrough()
         agentPresentationModel.sendSpokenFollowUp(prompt: prompt)
         voiceState = .idle
         scheduleTransientHideIfNeeded()
@@ -765,6 +1042,7 @@ final class CompanionManager: ObservableObject {
         systemSpeechSynthesizer.stopSpeaking()
         clearDetectedElementLocation()
         clearSpatialAnnotations()
+        clearSpatialInteractionWalkthrough()
         agentPresentationModel.showOverview()
 
         currentResponseGeneration &+= 1
@@ -792,6 +1070,8 @@ final class CompanionManager: ObservableObject {
         case .pressed:
             guard !buddyDictationManager.isDictationInProgress else { return }
             guard !showOnboardingVideo else { return }
+            clearSpatialInteractionWalkthrough()
+            clearSpatialCursorTrace()
             activeFastDictationFocusContext = nil
             fastDictationStartedAt = nil
             guard !buddyDictationManager.needsInitialPermissionPrompt else {
@@ -888,11 +1168,16 @@ final class CompanionManager: ObservableObject {
         ClickyAnalytics.trackFastDictationFailed()
     }
 
+    private static let screenAwareCompositionDeveloperInstructions = """
+    You are Clicky's screen-aware dictation composer. Use the attached screenshot and focused-field context to produce text for the user's current destination. Return only the exact insertion text with no markdown, commentary, or quotation marks. Never submit a form, run a command, click an interface element, edit a file, or use tools.
+    """
+
     private func composeAndInsertScreenAwareText(
         spokenInstruction: String,
         focusContext: DictationFocusContext,
         focusedTextContext: ScreenAwareFocusedTextContext,
-        startedAt: Date?
+        startedAt: Date?,
+        spatialCursorTrace: SpatialCursorTrace?
     ) {
         currentResponseTask?.cancel()
         elevenLabsTTSClient.stopPlayback()
@@ -930,9 +1215,42 @@ final class CompanionManager: ObservableObject {
                     textAfterSelection: focusedTextContext.textAfterSelection,
                     screenshotJPEGData: selectedScreenCapture.imageData
                 )
-                let compositionResponse = try await openAIScreenCompositionClient.compose(
-                    request: compositionRequest
+                let screenCaptureAttachments = try CompanionScreenCaptureAttachmentSet(
+                    screenCaptures: [selectedScreenCapture]
                 )
+                defer { screenCaptureAttachments.cleanup() }
+
+                let compositionResponse: ScreenAwareCompositionResponse
+                do {
+                    let spatialGroundingPromptBlock = CompanionScreenCaptureUtility
+                        .spatialGroundingPromptBlock(
+                            for: spatialCursorTrace,
+                            screenCaptures: [selectedScreenCapture]
+                        )
+                    let appServerCompositionPromptSections: [String?] = [
+                        compositionRequest.codexTextPrompt,
+                        "The attached screenshot is:\n"
+                            + screenCaptureAttachments.promptDescription,
+                        spatialGroundingPromptBlock
+                    ]
+                    let appServerCompositionPrompt = appServerCompositionPromptSections
+                    .compactMap { $0 }
+                    .joined(separator: "\n\n")
+                    let responseText = try await liveCodexCompanionService().respond(
+                        mode: .composition,
+                        prompt: appServerCompositionPrompt,
+                        localImagePaths: screenCaptureAttachments.imagePaths,
+                        developerInstructions: Self.screenAwareCompositionDeveloperInstructions
+                    )
+                    compositionResponse = try ScreenAwareCompositionResponse(
+                        text: responseText
+                    )
+                } catch {
+                    guard isLegacyWorkerConfigured else { throw error }
+                    compositionResponse = try await openAIScreenCompositionClient.compose(
+                        request: compositionRequest
+                    )
+                }
                 guard !Task.isCancelled else { return }
 
                 let insertionMethod = try await focusedTextInsertionService
@@ -963,6 +1281,15 @@ final class CompanionManager: ObservableObject {
         buddyDictationManager.lastErrorMessage = errorMessage
         NSSound.beep()
         ClickyAnalytics.trackScreenAwareDictationFailed()
+    }
+
+    private func liveCodexCompanionService() throws -> CodexCompanionService {
+        if let codexCompanionService {
+            return codexCompanionService
+        }
+        let codexCompanionService = try CodexCompanionService.makeLive()
+        self.codexCompanionService = codexCompanionService
+        return codexCompanionService
     }
 
     // MARK: - Companion Prompt
@@ -1005,6 +1332,12 @@ final class CompanionManager: ObservableObject {
 
     if pointing wouldn't help, append [POINT:none].
 
+    interactive walkthroughs:
+    when the user needs to perform a multi-step interface flow, guide exactly one user action at a time. append exactly one interactive tag after the spoken text, then stop and wait for the user to complete it. never emit more than one TARGET or HOVER tag in a response, and never combine an interactive tag with POINT, HIGHLIGHT, or SHAPE tags.
+    - [TARGET:x,y,width,height:label:screenN] means the user must click inside that screenshot-pixel region.
+    - [HOVER:x,y,width,height:label:screenN] means the user must keep their pointer inside that screenshot-pixel region.
+    screenN is required for every TARGET and HOVER tag and must exactly match an attached image label. use HOVER only when hovering itself reveals or advances the interface. after the user completes the step, inspect the fresh screenshots and either return the next single interactive step or say the walkthrough is finished with no interactive tag. never click, hover, submit, or act for the user.
+
     examples:
     - user asks how to color grade in final cut: "you'll want to open the color inspector — it's right up in the top right area of the toolbar. click that and you'll get all the color wheels and curves. [POINT:1100,42:color inspector]"
     - user asks what html is: "html stands for hypertext markup language, it's basically the skeleton of every web page. curious how it connects to the css you're looking at? [POINT:none]"
@@ -1019,7 +1352,10 @@ final class CompanionManager: ObservableObject {
     /// the spinner/processing state until TTS audio begins playing.
     /// Claude's response may include a [POINT:x,y:label] tag which triggers
     /// the buddy to fly to that element on screen.
-    private func sendTranscriptToClaudeWithScreenshot(transcript: String) {
+    private func sendTranscriptToClaudeWithScreenshot(
+        transcript: String,
+        spatialCursorTrace: SpatialCursorTrace?
+    ) {
         currentResponseTask?.cancel()
         elevenLabsTTSClient.stopPlayback()
         currentResponseGeneration &+= 1
@@ -1037,8 +1373,13 @@ final class CompanionManager: ObservableObject {
 
                 guard !Task.isCancelled else { return }
 
+                let screenCaptureAttachments = try CompanionScreenCaptureAttachmentSet(
+                    screenCaptures: screenCaptures
+                )
+                defer { screenCaptureAttachments.cleanup() }
+
                 // Build image labels with the actual screenshot pixel dimensions
-                // so Claude's coordinate space matches the image it sees. We
+                // so the fallback model's coordinate space matches the image it sees. We
                 // scale from screenshot pixels to display points ourselves.
                 let labeledImages = screenCaptures.map { capture in
                     let dimensionInfo = " (image dimensions: \(capture.screenshotWidthInPixels)x\(capture.screenshotHeightInPixels) pixels)"
@@ -1050,26 +1391,198 @@ final class CompanionManager: ObservableObject {
                     (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
                 }
 
-                let (fullResponseText, _) = try await claudeAPI.analyzeImageStreaming(
-                    images: labeledImages,
-                    systemPrompt: Self.companionVoiceResponseSystemPrompt,
-                    conversationHistory: historyForAPI,
-                    userPrompt: transcript,
-                    onTextChunk: { _ in
-                        // No streaming text display — spinner stays until TTS plays
-                    }
-                )
+                let fullResponseText: String
+                do {
+                    let spatialGroundingPromptBlock = CompanionScreenCaptureUtility
+                        .spatialGroundingPromptBlock(
+                            for: spatialCursorTrace,
+                            screenCaptures: screenCaptures
+                        )
+                    let appServerPromptSections: [String?] = [
+                        """
+                        The user said:
+                        <spoken-request>
+                        \(transcript)
+                        </spoken-request>
+
+                        The attached screen images are ordered as follows:
+                        \(screenCaptureAttachments.promptDescription)
+                        """,
+                        spatialGroundingPromptBlock
+                    ]
+                    let appServerPrompt = appServerPromptSections
+                        .compactMap { $0 }
+                        .joined(separator: "\n\n")
+                    fullResponseText = try await liveCodexCompanionService().respond(
+                        mode: .companion,
+                        prompt: appServerPrompt,
+                        localImagePaths: screenCaptureAttachments.imagePaths,
+                        developerInstructions: Self.companionVoiceResponseSystemPrompt
+                    )
+                } catch {
+                    guard isLegacyWorkerConfigured else { throw error }
+                    let legacyResponse = try await claudeAPI.analyzeImageStreaming(
+                        images: labeledImages,
+                        systemPrompt: Self.companionVoiceResponseSystemPrompt,
+                        conversationHistory: historyForAPI,
+                        userPrompt: transcript,
+                        onTextChunk: { _ in
+                            // No streaming text display — spinner stays until TTS plays
+                        }
+                    )
+                    fullResponseText = legacyResponse.text
+                }
 
                 guard !Task.isCancelled else { return }
+                await presentCompanionResponse(
+                    fullResponseText,
+                    screenCaptures: screenCaptures,
+                    expectedSpatialContextGeneration:
+                        responseSpatialContextGeneration,
+                    conversationUserTranscript: transcript
+                )
+            } catch is CancellationError {
+                // User spoke again — response was interrupted
+                if currentResponseGeneration == responseGeneration {
+                    clearSpatialInteractionWalkthrough()
+                }
+            } catch {
+                clearSpatialInteractionWalkthrough()
+                ClickyAnalytics.trackResponseError(error: error)
+                print("⚠️ Companion response error: \(error)")
+                buddyDictationManager.lastErrorMessage = "Clicky could not reach Codex. Open the agent panel to reconnect or sign in."
+                await speakWithSystemVoice(
+                    "I couldn't reach Codex. Open the agent panel to reconnect or sign in."
+                )
+            }
 
-                let spatialParseResult = SpatialAnnotationParser.parse(fullResponseText)
-                let parseResult = Self.parsePointingCoordinates(from: fullResponseText)
-                let spokenText = parseResult.spokenText
+            if !Task.isCancelled {
+                voiceState = .idle
+                scheduleTransientHideIfNeeded()
+            }
+        }
+    }
 
-                // Re-densify sequence numbers while filtering: POINT tags (rendered
-                // by the cursor flight, not the Canvas) and annotations that fail
-                // screen/geometry resolution would otherwise leave gaps that the
-                // reveal timeline burns ~180ms ticks skipping past.
+    private func continueSpatialInteractionWalkthrough(
+        afterCompleting completedStepLabel: String
+    ) {
+        currentResponseTask?.cancel()
+        elevenLabsTTSClient.stopPlayback()
+        systemSpeechSynthesizer.stopSpeaking()
+        clearDetectedElementLocation()
+        clearSpatialAnnotations()
+        currentResponseGeneration &+= 1
+        let responseGeneration = currentResponseGeneration
+        let responseSpatialContextGeneration = spatialContextGeneration
+
+        currentResponseTask = Task {
+            defer { finishResponseTask(responseGeneration: responseGeneration) }
+            voiceState = .processing
+
+            do {
+                let screenCaptures = try await CompanionScreenCaptureUtility
+                    .captureAllScreensAsJPEG()
+                guard !Task.isCancelled else { return }
+
+                let screenCaptureAttachments =
+                    try CompanionScreenCaptureAttachmentSet(
+                        screenCaptures: screenCaptures
+                    )
+                defer { screenCaptureAttachments.cleanup() }
+
+                let continuationPrompt = """
+                The user completed the walkthrough step labeled "\(completedStepLabel)".
+                Inspect these fresh screenshots:
+                \(screenCaptureAttachments.promptDescription)
+
+                Continue the same walkthrough. Give one concise spoken instruction and exactly one next TARGET or HOVER tag. If the task is complete, say so and emit no interactive tag.
+                """
+                let fullResponseText = try await liveCodexCompanionService()
+                    .respond(
+                        mode: .companion,
+                        prompt: continuationPrompt,
+                        localImagePaths: screenCaptureAttachments.imagePaths,
+                        developerInstructions:
+                            Self.companionVoiceResponseSystemPrompt
+                    )
+                guard !Task.isCancelled else { return }
+
+                await presentCompanionResponse(
+                    fullResponseText,
+                    screenCaptures: screenCaptures,
+                    expectedSpatialContextGeneration:
+                        responseSpatialContextGeneration,
+                    conversationUserTranscript: nil
+                )
+            } catch is CancellationError {
+                if currentResponseGeneration == responseGeneration {
+                    clearSpatialInteractionWalkthrough()
+                }
+            } catch {
+                clearSpatialInteractionWalkthrough()
+                ClickyAnalytics.trackResponseError(error: error)
+                print("⚠️ Walkthrough continuation error: \(error)")
+                buddyDictationManager.lastErrorMessage =
+                    "Clicky could not continue the walkthrough."
+                await speakWithSystemVoice(
+                    "I couldn't continue that walkthrough."
+                )
+            }
+
+            if !Task.isCancelled {
+                voiceState = .idle
+                scheduleTransientHideIfNeeded()
+            }
+        }
+    }
+
+    private func presentCompanionResponse(
+        _ fullResponseText: String,
+        screenCaptures: [CompanionScreenCapture],
+        expectedSpatialContextGeneration: Int,
+        conversationUserTranscript: String?
+    ) async {
+        let interactiveParseResult = SpatialInteractionTagParser.parse(
+            fullResponseText
+        )
+        let responseWithoutInteractiveTags =
+            interactiveParseResult.spokenText
+        let spatialParseResult = SpatialAnnotationParser.parse(
+            responseWithoutInteractiveTags
+        )
+        let pointingParseResult = Self.parsePointingCoordinates(
+            from: responseWithoutInteractiveTags
+        )
+        let spokenText = pointingParseResult.spokenText
+        let responseSpatialContextIsCurrent = spatialContextGeneration
+            == expectedSpatialContextGeneration
+
+        let spatialInteractionPresentation:
+            CompanionSpatialInteractionPresentation? = {
+                guard responseSpatialContextIsCurrent,
+                      let descriptor = interactiveParseResult.step,
+                      let exactScreenCapture = screenCaptures.first(where: {
+                          $0.screenNumber == descriptor.screenNumber
+                      }) else {
+                    return nil
+                }
+                return CompanionSpatialInteractionPresentation(
+                    descriptor: descriptor,
+                    screenCapture: exactScreenCapture
+                )
+            }()
+        publishSpatialInteractionPresentation(
+            spatialInteractionPresentation,
+            expectedSpatialContextGeneration:
+                expectedSpatialContextGeneration
+        )
+
+        let resolvedSpatialAnnotations:
+            [CompanionSpatialAnnotation] = {
+                guard spatialInteractionPresentation == nil else { return [] }
+                // Re-densify sequence numbers while filtering: POINT tags
+                // use the cursor flight, and unresolved annotations should not
+                // leave empty ticks in the ordered Canvas reveal.
                 var resolvedSpatialAnnotations: [CompanionSpatialAnnotation] = []
                 for annotation in spatialParseResult.annotations {
                     if case .point = annotation.kind { continue }
@@ -1086,136 +1599,177 @@ final class CompanionManager: ObservableObject {
                     guard let companionSpatialAnnotation else { continue }
                     resolvedSpatialAnnotations.append(companionSpatialAnnotation)
                 }
-                let responseSpatialContextIsCurrent = spatialContextGeneration
-                    == responseSpatialContextGeneration
+                return resolvedSpatialAnnotations
+            }()
 
-                // Pick the screen capture matching Claude's screen number,
-                // falling back to the cursor screen if not specified.
-                let targetScreenCapture: CompanionScreenCapture? = {
-                    Self.resolveScreenCapture(
-                        requestedScreenNumber: parseResult.screenNumber,
-                        screenCaptures: screenCaptures
-                    )
-                }()
+        let targetScreenCapture: CompanionScreenCapture? = {
+            guard spatialInteractionPresentation == nil else { return nil }
+            return Self.resolveScreenCapture(
+                requestedScreenNumber:
+                    pointingParseResult.screenNumber,
+                screenCaptures: screenCaptures
+            )
+        }()
+        // Vision-model coordinates can land a few pixels past a screenshot
+        // edge. Clamp the single cursor-flight point; static shape geometry
+        // remains strict because clamping a shape would distort it.
+        let clampedPointCoordinate: CGPoint? = {
+            guard responseSpatialContextIsCurrent,
+                  let pointCoordinate = pointingParseResult.coordinate,
+                  let targetScreenCapture else {
+                return nil
+            }
+            let screenshotWidth = CGFloat(
+                targetScreenCapture.screenshotWidthInPixels
+            )
+            let screenshotHeight = CGFloat(
+                targetScreenCapture.screenshotHeightInPixels
+            )
+            return CGPoint(
+                x: max(0, min(pointCoordinate.x, screenshotWidth)),
+                y: max(0, min(pointCoordinate.y, screenshotHeight))
+            )
+        }()
 
-                // Vision-model coordinates can land a few pixels past a screenshot
-                // edge for elements near the border. Clamp the single cursor-flight
-                // point instead of dropping the whole interaction (matching the
-                // onboarding demo path); HIGHLIGHT/SHAPE geometry stays strictly
-                // bounds-checked in SpatialAnnotationDisplayGeometry because a
-                // clamped shape would silently distort.
-                let clampedPointCoordinate: CGPoint? = {
-                    guard responseSpatialContextIsCurrent,
-                          let pointCoordinate = parseResult.coordinate,
-                          let targetScreenCapture else {
-                        return nil
-                    }
-                    let screenshotWidth = CGFloat(targetScreenCapture.screenshotWidthInPixels)
-                    let screenshotHeight = CGFloat(targetScreenCapture.screenshotHeightInPixels)
-                    return CGPoint(
-                        x: max(0, min(pointCoordinate.x, screenshotWidth)),
-                        y: max(0, min(pointCoordinate.y, screenshotHeight))
-                    )
-                }()
+        if clampedPointCoordinate != nil {
+            voiceState = .idle
+        }
+        if let pointCoordinate = clampedPointCoordinate,
+           let targetScreenCapture {
+            publishDetectedElementLocation(
+                screenshotPoint: pointCoordinate,
+                screenCapture: targetScreenCapture
+            )
+        } else if spatialInteractionPresentation == nil {
+            print("🎯 Element pointing requested without a coordinate")
+        }
 
-                // Switch to idle BEFORE setting a valid location so the triangle
-                // becomes visible and can fly to the target. Invalid or stale
-                // coordinates leave the processing state intact for TTS startup.
-                if clampedPointCoordinate != nil {
-                    voiceState = .idle
-                }
-
-                if let pointCoordinate = clampedPointCoordinate,
-                   let targetScreenCapture {
-                    // Claude's coordinates are in the screenshot's pixel space
-                    // (top-left origin, e.g. 1280x831). Scale to the display's
-                    // point space (e.g. 1512x982), then convert to AppKit global coords.
-                    let screenshotWidth = CGFloat(targetScreenCapture.screenshotWidthInPixels)
-                    let screenshotHeight = CGFloat(targetScreenCapture.screenshotHeightInPixels)
-                    let displayWidth = CGFloat(targetScreenCapture.displayWidthInPoints)
-                    let displayHeight = CGFloat(targetScreenCapture.displayHeightInPoints)
-                    let displayFrame = targetScreenCapture.displayFrame
-
-                    // Scale from screenshot pixels to display points
-                    let displayLocalX = pointCoordinate.x * (displayWidth / screenshotWidth)
-                    let displayLocalY = pointCoordinate.y * (displayHeight / screenshotHeight)
-
-                    // Convert from top-left origin (screenshot) to bottom-left origin (AppKit)
-                    let appKitY = displayHeight - displayLocalY
-
-                    // Convert display-local coords to global screen coords
-                    let globalLocation = CGPoint(
-                        x: displayLocalX + displayFrame.origin.x,
-                        y: appKitY + displayFrame.origin.y
-                    )
-
-                    detectedElementScreenLocation = globalLocation
-                    detectedElementDisplayFrame = displayFrame
-                    ClickyAnalytics.trackElementPointed()
-                    print("🎯 Element pointing: (\(Int(pointCoordinate.x)), \(Int(pointCoordinate.y)))")
-                } else {
-                    print("🎯 Element pointing requested without a coordinate")
-                }
-
-                // Save this exchange to conversation history (with the point tag
-                // stripped so it doesn't confuse future context)
-                conversationHistory.append((
-                    userTranscript: transcript,
-                    assistantResponse: spokenText
-                ))
-
-                // Keep only the last 10 exchanges to avoid unbounded context growth
-                if conversationHistory.count > 10 {
-                    conversationHistory.removeFirst(conversationHistory.count - 10)
-                }
-
-                print("🧠 Conversation history: \(conversationHistory.count) exchanges")
-
-                ClickyAnalytics.trackAIResponseReceived(response: spokenText)
-
-                // Play the response via TTS. Keep the spinner (processing state)
-                // until the audio actually starts playing, then switch to responding.
-                if !spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    do {
-                        try await elevenLabsTTSClient.speakText(spokenText)
-                        // speakText returns after player.play() — audio is now playing
-                        voiceState = .responding
-                        publishSpatialAnnotations(
-                            resolvedSpatialAnnotations,
-                            expectedSpatialContextGeneration: responseSpatialContextGeneration
-                        )
-                    } catch {
-                        ClickyAnalytics.trackTTSError(error: error)
-                        print("⚠️ ElevenLabs TTS error: \(error)")
-                        publishSpatialAnnotations(
-                            resolvedSpatialAnnotations,
-                            expectedSpatialContextGeneration: responseSpatialContextGeneration
-                        )
-                        await speakWithSystemVoice(spokenText)
-                    }
-                } else {
-                    publishSpatialAnnotations(
-                        resolvedSpatialAnnotations,
-                        expectedSpatialContextGeneration: responseSpatialContextGeneration
-                    )
-                }
-                scheduleSpatialAnnotationDismissal()
-            } catch is CancellationError {
-                // User spoke again — response was interrupted
-            } catch {
-                ClickyAnalytics.trackResponseError(error: error)
-                print("⚠️ Companion response error: \(error)")
-                buddyDictationManager.lastErrorMessage = "The companion service is unavailable. Agent requests still work with the agent trigger."
-                await speakWithSystemVoice(
-                    "I couldn't reach the companion service. Say Hey Clicky, agent, followed by a task to start Codex."
+        if let conversationUserTranscript {
+            conversationHistory.append((
+                userTranscript: conversationUserTranscript,
+                assistantResponse: spokenText
+            ))
+            if conversationHistory.count > 10 {
+                conversationHistory.removeFirst(
+                    conversationHistory.count - 10
                 )
             }
+            print(
+                "🧠 Conversation history: "
+                    + "\(conversationHistory.count) exchanges"
+            )
+        }
 
-            if !Task.isCancelled {
-                voiceState = .idle
-                scheduleTransientHideIfNeeded()
+        ClickyAnalytics.trackAIResponseReceived(response: spokenText)
+        await speakCompanionResponse(
+            spokenText,
+            spatialAnnotations: resolvedSpatialAnnotations,
+            expectedSpatialContextGeneration:
+                expectedSpatialContextGeneration
+        )
+        scheduleSpatialAnnotationDismissal()
+
+        guard !Task.isCancelled,
+              spatialContextGeneration
+                == expectedSpatialContextGeneration,
+              activeSpatialInteractionPresentation
+                == spatialInteractionPresentation,
+              spatialInteractionPresentation != nil else {
+            return
+        }
+        globalPushToTalkShortcutMonitor
+            .setSpatialInteractionObservationEnabled(true)
+    }
+
+    private func publishSpatialInteractionPresentation(
+        _ presentation: CompanionSpatialInteractionPresentation?,
+        expectedSpatialContextGeneration: Int
+    ) {
+        clearSpatialInteractionWalkthrough()
+        guard spatialContextGeneration
+                == expectedSpatialContextGeneration,
+              let presentation else {
+            return
+        }
+        activeSpatialInteractionPresentation = presentation
+        spatialInteractionProgress = .waiting
+    }
+
+    private func publishDetectedElementLocation(
+        screenshotPoint: CGPoint,
+        screenCapture: CompanionScreenCapture
+    ) {
+        let screenshotWidth = CGFloat(
+            screenCapture.screenshotWidthInPixels
+        )
+        let screenshotHeight = CGFloat(
+            screenCapture.screenshotHeightInPixels
+        )
+        let displayWidth = CGFloat(screenCapture.displayWidthInPoints)
+        let displayHeight = CGFloat(screenCapture.displayHeightInPoints)
+        let displayFrame = screenCapture.displayFrame
+        let displayLocalX = screenshotPoint.x
+            * (displayWidth / screenshotWidth)
+        let displayLocalY = screenshotPoint.y
+            * (displayHeight / screenshotHeight)
+        let appKitY = displayHeight - displayLocalY
+
+        detectedElementScreenLocation = CGPoint(
+            x: displayLocalX + displayFrame.origin.x,
+            y: appKitY + displayFrame.origin.y
+        )
+        detectedElementDisplayFrame = displayFrame
+        ClickyAnalytics.trackElementPointed()
+        print(
+            "🎯 Element pointing: "
+                + "(\(Int(screenshotPoint.x)), \(Int(screenshotPoint.y)))"
+        )
+    }
+
+    private func speakCompanionResponse(
+        _ spokenText: String,
+        spatialAnnotations: [CompanionSpatialAnnotation],
+        expectedSpatialContextGeneration: Int
+    ) async {
+        guard !spokenText.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        ).isEmpty else {
+            publishSpatialAnnotations(
+                spatialAnnotations,
+                expectedSpatialContextGeneration:
+                    expectedSpatialContextGeneration
+            )
+            return
+        }
+
+        if isLegacyWorkerConfigured {
+            do {
+                try await elevenLabsTTSClient.speakText(spokenText)
+                voiceState = .responding
+                publishSpatialAnnotations(
+                    spatialAnnotations,
+                    expectedSpatialContextGeneration:
+                        expectedSpatialContextGeneration
+                )
+                while elevenLabsTTSClient.isPlaying {
+                    try await Task.sleep(for: .milliseconds(100))
+                }
+                return
+            } catch is CancellationError {
+                elevenLabsTTSClient.stopPlayback()
+                return
+            } catch {
+                ClickyAnalytics.trackTTSError(error: error)
+                print("⚠️ ElevenLabs TTS error: \(error)")
             }
         }
+
+        publishSpatialAnnotations(
+            spatialAnnotations,
+            expectedSpatialContextGeneration:
+                expectedSpatialContextGeneration
+        )
+        await speakWithSystemVoice(spokenText)
     }
 
     /// Clears only the task that still owns the response slot. This prevents a
@@ -1234,7 +1788,11 @@ final class CompanionManager: ObservableObject {
     /// fades out the overlay after a 1-second pause. Cancelled automatically
     /// if the user starts another push-to-talk interaction.
     private func scheduleTransientHideIfNeeded() {
-        guard !isClickyCursorEnabled && isOverlayVisible else { return }
+        guard !isClickyCursorEnabled,
+              isOverlayVisible,
+              agentAttentionMessage == nil else {
+            return
+        }
 
         transientHideTask?.cancel()
         transientHideTask = Task {
@@ -1247,6 +1805,11 @@ final class CompanionManager: ObservableObject {
             // Wait for pointing animation to finish (location is cleared
             // when the buddy flies back to the cursor)
             while detectedElementScreenLocation != nil {
+                try? await Task.sleep(nanoseconds: 200_000_000)
+                guard !Task.isCancelled else { return }
+            }
+
+            while activeSpatialInteractionPresentation != nil {
                 try? await Task.sleep(nanoseconds: 200_000_000)
                 guard !Task.isCancelled else { return }
             }

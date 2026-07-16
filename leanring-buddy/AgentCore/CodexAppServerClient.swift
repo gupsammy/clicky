@@ -102,7 +102,8 @@ actor CodexAppServerClient {
     static func makeLive(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         bundleResourceURL: URL? = Bundle.main.resourceURL,
-        clientVersion: String = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "development"
+        clientVersion: String = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "development",
+        extraAppServerArguments: [String] = []
     ) throws -> CodexAppServerClient {
         guard let executableURL = CodexExecutableLocator.locate(
             environment: environment,
@@ -112,7 +113,10 @@ actor CodexAppServerClient {
         }
 
         return CodexAppServerClient(
-            transport: CodexAppServerProcessTransport(executableURL: executableURL),
+            transport: CodexAppServerProcessTransport(
+                executableURL: executableURL,
+                extraArguments: extraAppServerArguments
+            ),
             clientInfo: CodexAppServerClientInfo(
                 name: "clicky_macos",
                 title: "Clicky",
@@ -150,7 +154,9 @@ actor CodexAppServerClient {
                 method: "initialize",
                 parameters: CodexAppServerInitializeParameters(
                     clientInfo: clientInfo,
-                    capabilities: CodexAppServerInitializeCapabilities()
+                    capabilities: CodexAppServerInitializeCapabilities(
+                        experimentalApi: true
+                    )
                 )
             )
 

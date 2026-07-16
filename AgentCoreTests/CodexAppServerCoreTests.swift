@@ -49,6 +49,24 @@ final class CodexAppServerCoreTests: XCTestCase {
         )
     }
 
+    func testAgentRuntimeEnablesDefaultModeStructuredInput() {
+        XCTAssertEqual(
+            CodexAgentCoordinator.defaultAppServerArguments,
+            ["--enable", "default_mode_request_user_input"]
+        )
+        XCTAssertEqual(
+            CodexAppServerProcessTransport.processArguments(
+                extraArguments: CodexAgentCoordinator.defaultAppServerArguments
+            ),
+            [
+                "--enable",
+                "default_mode_request_user_input",
+                "app-server",
+                "--stdio"
+            ]
+        )
+    }
+
     func testStandardErrorCaptureKeepsOnlyTheBoundedTail() {
         let historicalData = Data("historical-auth-error".utf8)
         let recentData = Data("recent-crash-detail".utf8)

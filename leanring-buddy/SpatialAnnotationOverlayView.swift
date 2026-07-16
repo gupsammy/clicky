@@ -1,5 +1,244 @@
 import SwiftUI
 
+struct CompanionSpatialInteractionPresentation: Equatable {
+    let step: SpatialInteractionStep
+    let label: String
+    let capturedDisplayFrame: CGRect
+    let displayRegion: CGRect
+    let screenshotGeometry: SpatialScreenshotGeometry
+
+    init?(
+        descriptor: SpatialInteractionStepDescriptor,
+        screenCapture: CompanionScreenCapture
+    ) {
+        guard descriptor.screenNumber == screenCapture.screenNumber else {
+            return nil
+        }
+
+        let step: SpatialInteractionStep
+        do {
+            step = try SpatialInteractionStep(
+                identifier: descriptor.label,
+                displayIdentifier: screenCapture.displayIdentifier,
+                region: descriptor.region,
+                screenshotWidth: Double(screenCapture.screenshotWidthInPixels),
+                screenshotHeight: Double(screenCapture.screenshotHeightInPixels),
+                kind: descriptor.kind
+            )
+        } catch {
+            return nil
+        }
+
+        let displayWidth = Double(screenCapture.displayWidthInPoints)
+        let displayHeight = Double(screenCapture.displayHeightInPoints)
+        let screenshotWidth = Double(screenCapture.screenshotWidthInPixels)
+        let screenshotHeight = Double(screenCapture.screenshotHeightInPixels)
+        guard displayWidth > 0,
+              displayHeight > 0,
+              screenshotWidth > 0,
+              screenshotHeight > 0 else {
+            return nil
+        }
+
+        self.step = step
+        self.label = descriptor.label
+        self.capturedDisplayFrame = screenCapture.displayFrame
+        self.displayRegion = CGRect(
+            x: descriptor.region.x * displayWidth / screenshotWidth,
+            y: descriptor.region.y * displayHeight / screenshotHeight,
+            width: descriptor.region.width * displayWidth / screenshotWidth,
+            height: descriptor.region.height * displayHeight / screenshotHeight
+        )
+        self.screenshotGeometry = SpatialScreenshotGeometry(
+            displayIdentifier: screenCapture.displayIdentifier,
+            globalDisplayFrame: SpatialInteractionRect(
+                x: screenCapture.displayFrameInCoreGraphicsCoordinates.origin.x,
+                y: screenCapture.displayFrameInCoreGraphicsCoordinates.origin.y,
+                width: screenCapture.displayFrameInCoreGraphicsCoordinates.width,
+                height: screenCapture.displayFrameInCoreGraphicsCoordinates.height
+            ),
+            screenshotWidth: screenshotWidth,
+            screenshotHeight: screenshotHeight,
+            globalCoordinateOrigin: .topLeft
+        )
+    }
+}
+
+struct SpatialInteractionStepOverlayView: View {
+    let presentation: CompanionSpatialInteractionPresentation
+
+    private let interactionColor = Color(
+        red: 1.0,
+        green: 0.28,
+        blue: 0.36
+    )
+
+    var body: some View {
+        let isHoverStep: Bool = {
+            if case .hover = presentation.step.kind {
+                return true
+            }
+            return false
+        }()
+
+        ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(interactionColor.opacity(isHoverStep ? 0.08 : 0.16))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(
+                            interactionColor,
+                            style: StrokeStyle(
+                                lineWidth: isHoverStep ? 3 : 4,
+                                lineCap: .round,
+                                lineJoin: .round,
+                                dash: isHoverStep ? [8, 6] : []
+                            )
+                        )
+                }
+                .shadow(
+                    color: interactionColor.opacity(isHoverStep ? 0.35 : 0.62),
+                    radius: isHoverStep ? 8 : 13
+                )
+                .frame(
+                    width: presentation.displayRegion.width,
+                    height: presentation.displayRegion.height
+                )
+                .position(
+                    x: presentation.displayRegion.midX,
+                    y: presentation.displayRegion.midY
+                )
+
+            Text(presentation.label)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 5)
+                .background(
+                    Capsule(style: .continuous)
+                        .fill(interactionColor)
+                        .shadow(
+                            color: interactionColor.opacity(0.48),
+                            radius: 7
+                        )
+                )
+                .fixedSize()
+                .offset(
+                    x: presentation.displayRegion.minX,
+                    y: max(4, presentation.displayRegion.minY - 30)
+                )
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+struct SpatialCursorTraceOverlayView: View {
+    let samples: [SpatialCursorSample]
+    let displayIdentifier: CGDirectDisplayID
+    let globalDisplayFrame: CGRect
+    let displaySize: CGSize
+
+    private let traceColor = Color(
+        red: 0.18,
+        green: 0.88,
+        blue: 1.0
+    )
+
+    var body: some View {
+        let displayPoints = resolvedDisplayPoints
+        if displayPoints.isEmpty {
+            Color.clear
+        } else {
+            TimelineView(.animation(minimumInterval: 1.0 / 20.0)) {
+                timelineContext in
+                Canvas { context, _ in
+                    drawTrace(
+                        displayPoints,
+                        timelineDate: timelineContext.date,
+                        in: &context
+                    )
+                }
+            }
+            .allowsHitTesting(false)
+        }
+    }
+
+    private var resolvedDisplayPoints: [CGPoint] {
+        guard globalDisplayFrame.width > 0,
+              globalDisplayFrame.height > 0,
+              displaySize.width > 0,
+              displaySize.height > 0 else {
+            return []
+        }
+
+        return samples.compactMap { sample in
+            guard sample.displayIdentifier == displayIdentifier else {
+                return nil
+            }
+            let globalPoint = CGPoint(
+                x: sample.globalPoint.x,
+                y: sample.globalPoint.y
+            )
+            guard globalDisplayFrame.contains(globalPoint) else {
+                return nil
+            }
+            return CGPoint(
+                x: (globalPoint.x - globalDisplayFrame.minX)
+                    * displaySize.width / globalDisplayFrame.width,
+                y: (globalPoint.y - globalDisplayFrame.minY)
+                    * displaySize.height / globalDisplayFrame.height
+            )
+        }
+    }
+
+    private func drawTrace(
+        _ displayPoints: [CGPoint],
+        timelineDate: Date,
+        in context: inout GraphicsContext
+    ) {
+        context.addFilter(
+            .shadow(color: traceColor.opacity(0.75), radius: 7)
+        )
+
+        if displayPoints.count > 1 {
+            var tracePath = Path()
+            tracePath.move(to: displayPoints[0])
+            for displayPoint in displayPoints.dropFirst() {
+                tracePath.addLine(to: displayPoint)
+            }
+            context.stroke(
+                tracePath,
+                with: .color(traceColor.opacity(0.9)),
+                style: StrokeStyle(
+                    lineWidth: 3,
+                    lineCap: .round,
+                    lineJoin: .round
+                )
+            )
+        }
+
+        guard let finalDisplayPoint = displayPoints.last else { return }
+        let pulsePhase = timelineDate.timeIntervalSinceReferenceDate * 3.2
+        let haloRadius = CGFloat(11 + (sin(pulsePhase) + 1) * 3)
+        let haloRectangle = CGRect(
+            x: finalDisplayPoint.x - haloRadius,
+            y: finalDisplayPoint.y - haloRadius,
+            width: haloRadius * 2,
+            height: haloRadius * 2
+        )
+        context.fill(
+            Path(ellipseIn: haloRectangle),
+            with: .color(traceColor.opacity(0.13))
+        )
+        context.stroke(
+            Path(ellipseIn: haloRectangle),
+            with: .color(traceColor.opacity(0.9)),
+            lineWidth: 2
+        )
+    }
+}
+
 struct CompanionSpatialAnnotation: Identifiable, Equatable {
     let id: Int
     let displayIdentifier: CGDirectDisplayID

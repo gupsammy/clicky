@@ -212,6 +212,7 @@ enum CodexExecutableLocator {
 
 final class CodexAppServerProcessTransport: CodexAppServerTransport, @unchecked Sendable {
     private let executableURL: URL
+    private let extraArguments: [String]
     private let stateLock = NSLock()
 
     private var process: Process?
@@ -225,8 +226,18 @@ final class CodexAppServerProcessTransport: CodexAppServerTransport, @unchecked 
     private var isStoppingIntentionally = false
     private var isFinalizingProcessTermination = false
 
-    init(executableURL: URL) {
+    init(
+        executableURL: URL,
+        extraArguments: [String] = []
+    ) {
         self.executableURL = executableURL
+        self.extraArguments = extraArguments
+    }
+
+    static func processArguments(
+        extraArguments: [String] = []
+    ) -> [String] {
+        extraArguments + ["app-server", "--stdio"]
     }
 
     func start(
@@ -245,7 +256,7 @@ final class CodexAppServerProcessTransport: CodexAppServerTransport, @unchecked 
         let standardErrorPipe = Pipe()
 
         process.executableURL = executableURL
-        process.arguments = ["app-server", "--stdio"]
+        process.arguments = Self.processArguments(extraArguments: extraArguments)
         process.standardInput = standardInputPipe
         process.standardOutput = standardOutputPipe
         process.standardError = standardErrorPipe

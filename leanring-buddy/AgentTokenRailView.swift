@@ -122,13 +122,13 @@ private struct AgentPersistentTokenView: View {
         .scaleEffect(isDrawingAttention ? 1.035 : 1)
         .onHover { isHovered = $0 }
         .onAppear {
-            if task.status.isTerminal {
-                drawAttentionToCompletion()
+            if task.status.needsUserAttention || task.status.isTerminal {
+                drawAttention()
             }
         }
         .onChange(of: task.status) { _, newStatus in
-            if newStatus.isTerminal {
-                drawAttentionToCompletion()
+            if newStatus.needsUserAttention || newStatus.isTerminal {
+                drawAttention()
             }
         }
     }
@@ -162,7 +162,7 @@ private struct AgentPersistentTokenView: View {
         }
     }
 
-    private func drawAttentionToCompletion() {
+    private func drawAttention() {
         isDrawingAttention = false
         withAnimation(
             .easeInOut(duration: 0.34)
@@ -175,6 +175,12 @@ private struct AgentPersistentTokenView: View {
                 isDrawingAttention = false
             }
         }
+    }
+}
+
+private extension CodexAgentTaskStatus {
+    var needsUserAttention: Bool {
+        self == .waitingForApproval || self == .waitingForInput
     }
 }
 

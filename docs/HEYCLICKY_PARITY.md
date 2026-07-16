@@ -4,6 +4,36 @@ Status: research complete.
 Research date: July 15, 2026.
 Target: bring this open-source fork toward current HeyClicky behavior with an OpenAI-first stack, prioritizing dictation and Codex app-server agents. External SaaS integrations are intentionally deferred.
 
+## Implementation status
+
+As of July 16, 2026, this is a late parity implementation and native QA effort, not a completed full-parity clone. The highest-value product spine exists: subscription-backed Codex app-server agents, concurrent durable threads, the line-based notch HUD, approvals and structured input, same-thread spoken continuation, conservative voice routing, literal and screen-aware dictation foundations, companion vision, cursor grounding, static annotations, and one-step TARGET/HOVER walkthroughs.
+
+The remaining work is split between native acceptance and intentionally deferred scope:
+
+```text
+IMPLEMENTED, NOW UNDER QA
+  app-server agents + resume + attention delivery
+  spoken start/follow-up router
+  dictation and screen-aware composition paths
+  cursor trace, POINT/SHAPE, TARGET/HOVER
+  line-based notch, task history, persistent tokens
+
+PARTIAL OR NOT YET RELEASE-GREEN
+  cross-app physical dictation matrix
+  automatic spoken routing acceptance
+  live model-authored spatial alignment
+  long streaming CPU and 30-minute resilience soak
+  display hot-plug, VoiceOver, and complete TCC recovery matrix
+
+DEFERRED FROM THIS MILESTONE
+  full-duplex app-server/API Realtime voice
+  first-class computer-use automation
+  local memory and skill-management UI
+  MCP/SaaS integrations, proactive monitoring, billing, remote tasks
+```
+
+Therefore, current work is both feature completion and QA-driven bug fixing. The app is not yet at literal full HeyClicky v10 parity, and the active goal must remain open until the release-gate scenarios in the manual QA document are either verified or explicitly accepted as deferred.
+
 ## Executive conclusion
 
 The public repository is not merely an older UI. It contains the first product architecture: a voice-triggered screen-aware tutor whose response is rendered beside a blue cursor. Current HeyClicky has evolved into a two-lane macOS assistant shell:
