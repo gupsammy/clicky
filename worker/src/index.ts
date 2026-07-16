@@ -19,6 +19,7 @@ interface Env {
   ELEVENLABS_VOICE_ID: string;
   ASSEMBLYAI_API_KEY: string;
   OPENAI_API_KEY: string;
+  CLICKY_PROXY_ACCESS_TOKEN: string;
 }
 
 interface ServiceAccountKey {
@@ -54,6 +55,13 @@ export default {
       }
 
       if (url.pathname === "/openai-realtime-token") {
+        const authorizationFailure = authorizeRealtimeTokenRequest(
+          request,
+          env
+        );
+        if (authorizationFailure) {
+          return authorizationFailure;
+        }
         return await handleOpenAIRealtimeToken(env);
       }
     } catch (error) {
@@ -67,6 +75,49 @@ export default {
     return new Response("Not found", { status: 404 });
   },
 };
+
+function authorizeRealtimeTokenRequest(
+  request: Request,
+  env: Env
+): Response | undefined {
+  const configuredAccessToken = env.CLICKY_PROXY_ACCESS_TOKEN?.trim();
+  if (!configuredAccessToken || configuredAccessToken.length < 32) {
+    console.error("[auth] CLICKY_PROXY_ACCESS_TOKEN is missing or too short");
+    return new Response(
+      JSON.stringify({ error: "Worker authorization is not configured." }),
+      { status: 503, headers: { "content-type": "application/json" } }
+    );
+  }
+
+  const authorizationHeader = request.headers.get("authorization") ?? "";
+  const expectedAuthorizationHeader = `Bearer ${configuredAccessToken}`;
+  if (!constantTimeEqual(authorizationHeader, expectedAuthorizationHeader)) {
+    return new Response(
+      JSON.stringify({ error: "Unauthorized." }),
+      { status: 401, headers: { "content-type": "application/json" } }
+    );
+  }
+
+  return undefined;
+}
+
+function constantTimeEqual(
+  firstValue: string,
+  secondValue: string
+): boolean {
+  const comparisonLength = Math.max(firstValue.length, secondValue.length);
+  let difference = firstValue.length ^ secondValue.length;
+  for (
+    let characterIndex = 0;
+    characterIndex < comparisonLength;
+    characterIndex += 1
+  ) {
+    difference |=
+      (firstValue.charCodeAt(characterIndex) || 0)
+      ^ (secondValue.charCodeAt(characterIndex) || 0);
+  }
+  return difference === 0;
+}
 
 async function handleChat(request: Request, env: Env): Promise<Response> {
   // The Swift client builds a request body in the Anthropic Messages API shape

@@ -46,12 +46,12 @@ final class OpenAIRealtimeTranscriptionProvider: BuddyTranscriptionProvider {
     }
 
     var isConfigured: Bool {
-        ephemeralTokenProxyURL != nil
+        ephemeralTokenProxyURL != nil && ClickyProxyAuthorization.isConfigured
     }
 
     var unavailableExplanation: String? {
         guard !isConfigured else { return nil }
-        return "OpenAI Realtime transcription is not configured. Set ClickyAPIProxyBaseURL in Info.plist."
+        return "OpenAI Realtime transcription requires a Worker URL and access token."
     }
 
     func startStreamingSession(
@@ -109,6 +109,7 @@ final class OpenAIRealtimeTranscriptionProvider: BuddyTranscriptionProvider {
     private func fetchEphemeralToken(from tokenProxyURL: URL) async throws -> String {
         var request = URLRequest(url: tokenProxyURL)
         request.httpMethod = "POST"
+        try ClickyProxyAuthorization.authorize(&request)
 
         let (responseData, response) = try await URLSession.shared.data(for: request)
 

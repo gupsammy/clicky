@@ -35,7 +35,7 @@ The app never calls external APIs directly. All requests go through a Cloudflare
 | `POST /transcribe-token` | `streaming.assemblyai.com/v3/token` | Fetches a short-lived (480s) AssemblyAI websocket token. Unused when `VoiceTranscriptionProvider=apple` in Info.plist. |
 | `POST /openai-realtime-token` | `api.openai.com/v1/realtime/client_secrets` | Fetches a short-lived OpenAI transcription-session client secret. |
 
-Worker secrets: `GCP_SERVICE_ACCOUNT_KEY` (full JSON key for the Vertex proxy service account), `ELEVENLABS_API_KEY`, `OPENAI_API_KEY`, `ASSEMBLYAI_API_KEY` (optional — only needed if the app uses AssemblyAI transcription).
+Worker secrets: `GCP_SERVICE_ACCOUNT_KEY` (full JSON key for the Vertex proxy service account), `ELEVENLABS_API_KEY`, `OPENAI_API_KEY`, `CLICKY_PROXY_ACCESS_TOKEN` (matching per-install token stored in the macOS Keychain), `ASSEMBLYAI_API_KEY` (optional — only needed if the app uses AssemblyAI transcription).
 Worker vars: `ELEVENLABS_VOICE_ID`, `VERTEX_PROJECT_ID`, `VERTEX_REGION`
 
 ### Key Architecture Decisions
@@ -73,6 +73,7 @@ Worker vars: `ELEVENLABS_VOICE_ID`, `VERTEX_PROJECT_ID`, `VERTEX_REGION`
 | `BuddyTranscriptionProvider.swift` | ~100 | Protocol surface and provider factory for voice transcription backends. Resolves provider based on `VoiceTranscriptionProvider` in Info.plist — AssemblyAI, OpenAI, or Apple Speech. |
 | `AssemblyAIStreamingTranscriptionProvider.swift` | ~478 | Streaming transcription provider. Fetches temp tokens from the Cloudflare Worker, opens an AssemblyAI v3 websocket, streams PCM16 audio, tracks turn-based transcripts, and delivers finalized text on key-up. Shares a single URLSession across all sessions. |
 | `OpenAIRealtimeTranscriptionProvider.swift` | ~418 | OpenAI-first streaming provider. Fetches an ephemeral client secret from the Worker, streams 24 kHz PCM16 to Realtime, commits on key-up, and delivers partial/final transcripts without embedding an API key. |
+| `ClickyProxyAuthorization.swift` | ~64 | Reads the deployment-specific Worker bearer token from the macOS Keychain and authorizes proxy requests without embedding it in the app. |
 | `DictationCore/OpenAIRealtimeTranscriptionProtocol.swift` | ~188 | UI-independent session/client event encoding, server event parsing, and item-aware transcript accumulation for OpenAI Realtime. |
 | `AppleSpeechTranscriptionProvider.swift` | ~147 | Local fallback transcription provider backed by Apple's Speech framework. |
 | `BuddyAudioConversionSupport.swift` | ~108 | Audio conversion helpers. Converts live mic buffers to PCM16 mono audio and builds WAV payloads for upload-based providers. |
