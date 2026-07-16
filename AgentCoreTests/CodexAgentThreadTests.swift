@@ -164,6 +164,60 @@ final class CodexAgentThreadTests: XCTestCase {
         await client.stop()
     }
 
+    func testResumeAndTurnStartRejectAThreadFromAnotherWorkspace() async throws {
+        let transport = AgentThreadMockTransport()
+        let client = makeClient(transport: transport)
+        _ = try await client.connect()
+
+        let otherDirectoryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: otherDirectoryURL,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: otherDirectoryURL) }
+        let otherWorkspace = try CodexAgentWorkspace(
+            directoryURL: otherDirectoryURL
+        )
+
+        do {
+            _ = try await client.resumeThread(
+                threadID: "thread_123",
+                in: otherWorkspace
+            )
+            XCTFail("Expected resumeThread to reject the other workspace")
+        } catch let error as CodexAppServerError {
+            XCTAssertEqual(
+                error,
+                .threadOutsideWorkspace(
+                    threadID: "thread_123",
+                    workspacePath: otherWorkspace.path
+                )
+            )
+        }
+
+        do {
+            _ = try await client.startTurn(
+                threadID: "thread_123",
+                prompt: "Do not run this",
+                in: otherWorkspace
+            )
+            XCTFail("Expected startTurn to reject the other workspace")
+        } catch let error as CodexAppServerError {
+            XCTAssertEqual(
+                error,
+                .threadOutsideWorkspace(
+                    threadID: "thread_123",
+                    workspacePath: otherWorkspace.path
+                )
+            )
+        }
+
+        XCTAssertNil(transport.lastParameters(for: "thread/resume"))
+        XCTAssertNil(transport.lastParameters(for: "turn/start"))
+        await client.stop()
+    }
+
     func testEmptyPromptFailsBeforeSendingATurn() async throws {
         let transport = AgentThreadMockTransport()
         let client = makeClient(transport: transport)

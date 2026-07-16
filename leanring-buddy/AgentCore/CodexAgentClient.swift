@@ -33,7 +33,11 @@ extension CodexAppServerClient {
         in workspace: CodexAgentWorkspace,
         model: String? = nil
     ) async throws -> CodexThreadResumeResponse {
-        try await sendRequest(
+        _ = try await readThread(
+            threadID: threadID,
+            in: workspace
+        )
+        return try await sendRequest(
             method: "thread/resume",
             parameters: CodexThreadResumeParameters(
                 threadId: threadID,
@@ -106,6 +110,10 @@ extension CodexAppServerClient {
         clientUserMessageID: String = UUID().uuidString
     ) async throws -> CodexTurnStartResponse {
         let normalizedPrompt = try normalizedPrompt(prompt)
+        _ = try await readThread(
+            threadID: threadID,
+            in: workspace
+        )
 
         return try await sendRequest(
             method: "turn/start",
