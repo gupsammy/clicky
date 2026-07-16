@@ -12,6 +12,7 @@ permissions:
 jobs:
   test:
     runs-on: macos-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - name: Test Codex app-server core
