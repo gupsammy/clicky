@@ -312,6 +312,13 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         isPreparingToRecord || isRecordingFromMicrophoneButton || isRecordingFromKeyboardShortcut || isFinalizingTranscript
     }
 
+    /// Lets collaborators (e.g. fast dictation's insertion pipeline) surface a
+    /// failure through the published error state without writing the property
+    /// from outside, keeping this class the sole owner of error reporting.
+    func reportExternalFailure(_ errorMessage: String) {
+        lastErrorMessage = errorMessage
+    }
+
     var isActivelyRecordingAudio: Bool {
         isRecordingFromMicrophoneButton || isRecordingFromKeyboardShortcut
     }

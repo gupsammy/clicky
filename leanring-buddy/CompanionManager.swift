@@ -97,6 +97,7 @@ final class CompanionManager: ObservableObject {
     private var accessibilityCheckTimer: Timer?
     private var pendingKeyboardShortcutStartTask: Task<Void, Never>?
     private var activeFastDictationFocusContext: DictationFocusContext?
+    private var activeFastDictationInsertionTask: Task<Void, Never>?
     private var fastDictationStartedAt: Date?
     /// Scheduled hide for transient cursor mode — cancelled if the user
     /// speaks again before the delay elapses.
@@ -304,6 +305,8 @@ final class CompanionManager: ObservableObject {
         buddyDictationManager.cancelCurrentDictation()
         activeFastDictationFocusContext = nil
         fastDictationStartedAt = nil
+        activeFastDictationInsertionTask?.cancel()
+        activeFastDictationInsertionTask = nil
         overlayWindowManager.hideOverlay()
         transientHideTask?.cancel()
 
@@ -620,7 +623,8 @@ final class CompanionManager: ObservableObject {
                         guard let focusContext = self.activeFastDictationFocusContext else { return }
                         let fastDictationStartedAt = self.fastDictationStartedAt
 
-                        Task { @MainActor [weak self] in
+                        self.activeFastDictationInsertionTask?.cancel()
+                        self.activeFastDictationInsertionTask = Task { @MainActor [weak self] in
                             guard let self else { return }
                             do {
                                 let insertionMethod = try await self.focusedTextInsertionService.insert(
@@ -634,6 +638,8 @@ final class CompanionManager: ObservableObject {
                                         since: fastDictationStartedAt
                                     )
                                 )
+                            } catch is CancellationError {
+                                // A newer session or stop() superseded this insertion.
                             } catch {
                                 self.reportFastDictationFailure(error.localizedDescription)
                             }
@@ -669,7 +675,7 @@ final class CompanionManager: ObservableObject {
     }
 
     private func reportFastDictationFailure(_ errorMessage: String) {
-        buddyDictationManager.lastErrorMessage = errorMessage
+        buddyDictationManager.reportExternalFailure(errorMessage)
         NSSound.beep()
         ClickyAnalytics.trackFastDictationFailed()
     }

@@ -357,28 +357,35 @@ final class FocusedTextInsertionService {
     }
 
     private func postUnicodeKeyboardEvents(_ transcriptText: String) -> Bool {
-        guard let keyDownEvent = CGEvent(
-            keyboardEventSource: nil,
-            virtualKey: 0,
-            keyDown: true
-        ),
-              let keyUpEvent = CGEvent(
+        // The OS truncates keyboardSetUnicodeString payloads beyond ~20 UTF-16
+        // code units per event, so the transcript is posted as one keyDown/
+        // keyUp pair per bounded chunk instead of a single oversized event.
+        let keystrokeChunks = FocusedTextUnicodeKeystrokeChunker
+            .utf16KeystrokeChunks(for: transcriptText)
+
+        for keystrokeChunk in keystrokeChunks {
+            guard let keyDownEvent = CGEvent(
                 keyboardEventSource: nil,
                 virtualKey: 0,
-                keyDown: false
-              ) else {
-            return false
-        }
+                keyDown: true
+            ),
+                  let keyUpEvent = CGEvent(
+                    keyboardEventSource: nil,
+                    virtualKey: 0,
+                    keyDown: false
+                  ) else {
+                return false
+            }
 
-        let transcriptUTF16CodeUnits = Array(transcriptText.utf16)
-        transcriptUTF16CodeUnits.withUnsafeBufferPointer { transcriptBuffer in
-            keyDownEvent.keyboardSetUnicodeString(
-                stringLength: transcriptBuffer.count,
-                unicodeString: transcriptBuffer.baseAddress
-            )
+            keystrokeChunk.withUnsafeBufferPointer { chunkBuffer in
+                keyDownEvent.keyboardSetUnicodeString(
+                    stringLength: chunkBuffer.count,
+                    unicodeString: chunkBuffer.baseAddress
+                )
+            }
+            keyDownEvent.post(tap: .cghidEventTap)
+            keyUpEvent.post(tap: .cghidEventTap)
         }
-        keyDownEvent.post(tap: .cghidEventTap)
-        keyUpEvent.post(tap: .cghidEventTap)
         return true
     }
 }

@@ -80,6 +80,37 @@ public struct FocusedTextInsertionPlan: Equatable, Sendable {
     }
 }
 
+public enum FocusedTextUnicodeKeystrokeChunker {
+    // CGEvent's keyboardSetUnicodeString buffer holds at most 20 UTF-16 code
+    // units per event; anything longer is silently truncated by the OS, so a
+    // long transcript must be posted as multiple keyDown/keyUp pairs.
+    public static let maximumCodeUnitsPerKeystrokeEvent = 20
+
+    // Chunks are built from whole unicode scalars so a surrogate pair (e.g.
+    // an emoji) can never be split across two keystroke events, which would
+    // type invalid UTF-16 into the focused field.
+    public static func utf16KeystrokeChunks(for text: String) -> [[UInt16]] {
+        var keystrokeChunks: [[UInt16]] = []
+        var currentChunk: [UInt16] = []
+        currentChunk.reserveCapacity(maximumCodeUnitsPerKeystrokeEvent)
+
+        for unicodeScalar in text.unicodeScalars {
+            let scalarCodeUnits = Array(String(unicodeScalar).utf16)
+            if !currentChunk.isEmpty,
+               currentChunk.count + scalarCodeUnits.count > maximumCodeUnitsPerKeystrokeEvent {
+                keystrokeChunks.append(currentChunk)
+                currentChunk = []
+            }
+            currentChunk.append(contentsOf: scalarCodeUnits)
+        }
+
+        if !currentChunk.isEmpty {
+            keystrokeChunks.append(currentChunk)
+        }
+        return keystrokeChunks
+    }
+}
+
 public struct FocusedTextInsertionPlanError: LocalizedError, Sendable {
     public let message: String
 
