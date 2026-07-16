@@ -8,9 +8,13 @@ struct CompanionSpatialAnnotation: Identifiable, Equatable {
     let label: String?
     let kind: CompanionSpatialAnnotationKind
 
+    /// `sequenceNumber` is the densified reveal-order position assigned by the
+    /// caller after filtering, not `annotation.sequenceNumber` — filtered POINT
+    /// tags would otherwise leave gaps that stall the Canvas reveal timeline.
     init?(
         annotation: SpatialAnnotation,
-        screenCapture: CompanionScreenCapture
+        screenCapture: CompanionScreenCapture,
+        sequenceNumber: Int
     ) {
         let geometry = SpatialAnnotationDisplayGeometry(
             screenshotWidth: Double(screenCapture.screenshotWidthInPixels),
@@ -25,10 +29,10 @@ struct CompanionSpatialAnnotation: Identifiable, Equatable {
             return nil
         }
 
-        id = annotation.sequenceNumber
+        id = sequenceNumber
         displayIdentifier = screenCapture.displayIdentifier
         capturedDisplayFrame = screenCapture.displayFrame
-        sequenceNumber = annotation.sequenceNumber
+        self.sequenceNumber = sequenceNumber
         label = annotation.label
         kind = resolvedKind
     }

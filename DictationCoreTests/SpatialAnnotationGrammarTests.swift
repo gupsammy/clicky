@@ -71,11 +71,13 @@ final class SpatialAnnotationGrammarTests: XCTestCase {
             "Look. [POINT:10,20:item:screen99]"
         )
         XCTAssertTrue(invalidScreen.annotations.isEmpty)
-        XCTAssertTrue(
-            SpatialAnnotationParser.parse(
-                "Look. [POINT:10,20:item:screenfoo]"
-            ).annotations.isEmpty
+        // "screenfoo" has no numeric remainder, so it is label text rather than
+        // a malformed screen suffix — the tag stays valid with no screen number.
+        let nonNumericScreenSuffix = SpatialAnnotationParser.parse(
+            "Look. [POINT:10,20:item:screenfoo]"
         )
+        XCTAssertEqual(nonNumericScreenSuffix.annotations.first?.label, "item:screenfoo")
+        XCTAssertNil(nonNumericScreenSuffix.annotations.first?.screenNumber)
 
         let tags = (1...20).map {
             "[POINT:\($0),\($0):item \($0):screen1]"
@@ -83,6 +85,42 @@ final class SpatialAnnotationGrammarTests: XCTestCase {
         XCTAssertEqual(
             SpatialAnnotationParser.parse(tags).annotations.count,
             SpatialAnnotationParser.maximumAnnotationCount
+        )
+    }
+
+    func testLabelsStartingWithScreenAreNotMistakenForScreenSuffixes() {
+        XCTAssertEqual(
+            SpatialAnnotationParser.parse(
+                "Click here. [POINT:100,200:screen recording icon]"
+            ).annotations,
+            [
+                SpatialAnnotation(
+                    sequenceNumber: 1,
+                    screenNumber: nil,
+                    label: "screen recording icon",
+                    kind: .point(SpatialAnnotationPoint(x: 100, y: 200))
+                )
+            ]
+        )
+
+        let highlightWithScreenPrefixedLabel = SpatialAnnotationParser.parse(
+            "Look here. [HIGHLIGHT:10,20,100,50:screensaver settings]"
+        )
+        XCTAssertEqual(
+            highlightWithScreenPrefixedLabel.annotations.first?.label,
+            "screensaver settings"
+        )
+        XCTAssertNil(highlightWithScreenPrefixedLabel.annotations.first?.screenNumber)
+
+        // An explicit all-digit suffix after a screen-prefixed label still
+        // binds as the screen number, not as more label text.
+        let explicitScreenSuffix = SpatialAnnotationParser.parse(
+            "There. [POINT:5,5:screen recording icon:screen2]"
+        )
+        XCTAssertEqual(explicitScreenSuffix.annotations.first?.screenNumber, 2)
+        XCTAssertEqual(
+            explicitScreenSuffix.annotations.first?.label,
+            "screen recording icon"
         )
     }
 

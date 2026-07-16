@@ -300,7 +300,16 @@ public enum SpatialAnnotationParser {
             return (nil, true)
         }
         guard lastComponent.hasPrefix("screen") else { return (nil, true) }
-        guard let screenNumber = Int(lastComponent.dropFirst("screen".count)),
+        // A label whose last word merely starts with "screen" ("screen recording
+        // icon", "screensaver settings") is not a screen suffix. Only commit to
+        // the screen-suffix interpretation when the remainder is purely digits;
+        // otherwise the component flows into the label like any other text.
+        let screenNumberDigits = lastComponent.dropFirst("screen".count)
+        guard !screenNumberDigits.isEmpty,
+              screenNumberDigits.allSatisfy({ $0.isASCII && $0.isNumber }) else {
+            return (nil, true)
+        }
+        guard let screenNumber = Int(screenNumberDigits),
               (1...16).contains(screenNumber) else {
             return (nil, false)
         }

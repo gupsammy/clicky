@@ -1066,17 +1066,25 @@ final class CompanionManager: ObservableObject {
                 let parseResult = Self.parsePointingCoordinates(from: fullResponseText)
                 let spokenText = parseResult.spokenText
 
-                let resolvedSpatialAnnotations = spatialParseResult.annotations.compactMap { annotation -> CompanionSpatialAnnotation? in
-                    if case .point = annotation.kind { return nil }
+                // Re-densify sequence numbers while filtering: POINT tags (rendered
+                // by the cursor flight, not the Canvas) and annotations that fail
+                // screen/geometry resolution would otherwise leave gaps that the
+                // reveal timeline burns ~180ms ticks skipping past.
+                var resolvedSpatialAnnotations: [CompanionSpatialAnnotation] = []
+                for annotation in spatialParseResult.annotations {
+                    if case .point = annotation.kind { continue }
                     let targetCapture = Self.resolveScreenCapture(
                         requestedScreenNumber: annotation.screenNumber,
                         screenCaptures: screenCaptures
                     )
-                    guard let targetCapture else { return nil }
-                    return CompanionSpatialAnnotation(
+                    guard let targetCapture else { continue }
+                    let companionSpatialAnnotation = CompanionSpatialAnnotation(
                         annotation: annotation,
-                        screenCapture: targetCapture
+                        screenCapture: targetCapture,
+                        sequenceNumber: resolvedSpatialAnnotations.count + 1
                     )
+                    guard let companionSpatialAnnotation else { continue }
+                    resolvedSpatialAnnotations.append(companionSpatialAnnotation)
                 }
                 let responseSpatialContextIsCurrent = spatialContextGeneration
                     == responseSpatialContextGeneration
@@ -1090,27 +1098,34 @@ final class CompanionManager: ObservableObject {
                     )
                 }()
 
-                let hasValidPointCoordinate: Bool = {
+                // Vision-model coordinates can land a few pixels past a screenshot
+                // edge for elements near the border. Clamp the single cursor-flight
+                // point instead of dropping the whole interaction (matching the
+                // onboarding demo path); HIGHLIGHT/SHAPE geometry stays strictly
+                // bounds-checked in SpatialAnnotationDisplayGeometry because a
+                // clamped shape would silently distort.
+                let clampedPointCoordinate: CGPoint? = {
                     guard responseSpatialContextIsCurrent,
                           let pointCoordinate = parseResult.coordinate,
                           let targetScreenCapture else {
-                        return false
+                        return nil
                     }
-                    return pointCoordinate.x >= 0
-                        && pointCoordinate.y >= 0
-                        && pointCoordinate.x <= CGFloat(targetScreenCapture.screenshotWidthInPixels)
-                        && pointCoordinate.y <= CGFloat(targetScreenCapture.screenshotHeightInPixels)
+                    let screenshotWidth = CGFloat(targetScreenCapture.screenshotWidthInPixels)
+                    let screenshotHeight = CGFloat(targetScreenCapture.screenshotHeightInPixels)
+                    return CGPoint(
+                        x: max(0, min(pointCoordinate.x, screenshotWidth)),
+                        y: max(0, min(pointCoordinate.y, screenshotHeight))
+                    )
                 }()
 
                 // Switch to idle BEFORE setting a valid location so the triangle
                 // becomes visible and can fly to the target. Invalid or stale
                 // coordinates leave the processing state intact for TTS startup.
-                if hasValidPointCoordinate {
+                if clampedPointCoordinate != nil {
                     voiceState = .idle
                 }
 
-                if hasValidPointCoordinate,
-                   let pointCoordinate = parseResult.coordinate,
+                if let pointCoordinate = clampedPointCoordinate,
                    let targetScreenCapture {
                     // Claude's coordinates are in the screenshot's pixel space
                     // (top-left origin, e.g. 1280x831). Scale to the display's
@@ -1313,7 +1328,8 @@ final class CompanionManager: ObservableObject {
         let spokenText: String
         /// The parsed pixel coordinate, or nil if Claude said "none" or no tag was found.
         let coordinate: CGPoint?
-        /// Short label describing the element (e.g. "run button"), or "none".
+        /// Short label describing the element (e.g. "run button"), or nil when
+        /// no point annotation was parsed from the response.
         let elementLabel: String?
         /// Which screen the coordinate refers to (1-based), or nil to default to cursor screen.
         let screenNumber: Int?
@@ -1330,7 +1346,7 @@ final class CompanionManager: ObservableObject {
             return PointingParseResult(
                 spokenText: parseResult.spokenText,
                 coordinate: nil,
-                elementLabel: parseResult.annotations.isEmpty ? "none" : nil,
+                elementLabel: nil,
                 screenNumber: nil
             )
         }
