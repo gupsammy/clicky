@@ -747,6 +747,123 @@ final class CodexAppServerCoreTests: XCTestCase {
         XCTAssertTrue(transport.sentMethods.isEmpty)
     }
 
+    func testCoordinatorRefusesFollowUpWhileContextIsCompacting() async throws {
+        let transport = MockCodexAppServerTransport()
+        let coordinator = CodexAgentCoordinator(
+            client: makeClient(transport: transport)
+        )
+        let task = CodexAgentTaskSnapshot(
+            threadID: "thread_compacting",
+            turnID: "turn_compacting",
+            workspacePath: "/tmp",
+            title: "Compacting",
+            status: .running,
+            latestAgentMessage: "",
+            currentActivity: CodexAgentActivity(
+                itemID: "compaction_item",
+                kind: .contextCompaction,
+                summary: "Compacting context",
+                status: .running
+            ),
+            activities: [
+                CodexAgentActivity(
+                    itemID: "compaction_item",
+                    kind: .contextCompaction,
+                    summary: "Compacting context",
+                    status: .running
+                )
+            ],
+            pendingApprovals: [],
+            pendingUserInputs: [],
+            errorMessage: nil,
+            lastEventSequence: 1
+        )
+        let workspace = try CodexAgentWorkspace(
+            directoryURL: URL(fileURLWithPath: "/tmp")
+        )
+
+        do {
+            try await coordinator.followUp(
+                prompt: "Continue",
+                on: task,
+                in: workspace
+            )
+            XCTFail("Expected the coordinator to refuse follow-up during compaction")
+        } catch let error as CodexAppServerError {
+            XCTAssertEqual(error, .threadBusyCompacting)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+        XCTAssertTrue(transport.sentMethods.isEmpty)
+    }
+
+    func testCoordinatorRefreshesCompletedTaskBeforeChoosingFollowUpOperation() async throws {
+        let transport = MockCodexAppServerTransport()
+        let store = CodexAgentTaskStore()
+        let coordinator = CodexAgentCoordinator(
+            client: makeClient(transport: transport),
+            taskStore: store
+        )
+        _ = try await coordinator.start()
+        defer { Task { await coordinator.stop() } }
+
+        let completedTurn = CodexTurn(
+            id: "turn_completed",
+            status: .completed,
+            items: [],
+            startedAt: 1,
+            completedAt: 2,
+            durationMs: 1,
+            error: nil
+        )
+        await store.register(
+            thread: CodexThread(
+                id: "thread_completed",
+                sessionId: "session_completed",
+                preview: "Completed task",
+                name: nil,
+                cwd: "/tmp",
+                modelProvider: "openai",
+                cliVersion: "0.144.2",
+                createdAt: 1,
+                updatedAt: 2,
+                ephemeral: false,
+                status: CodexThreadStatus(type: "idle", activeFlags: nil),
+                turns: [completedTurn]
+            )
+        )
+        let staleRunningTask = CodexAgentTaskSnapshot(
+            threadID: "thread_completed",
+            turnID: "turn_completed",
+            workspacePath: "/tmp",
+            title: "Completed task",
+            status: .running,
+            latestAgentMessage: "",
+            currentActivity: nil,
+            activities: [],
+            pendingApprovals: [],
+            pendingUserInputs: [],
+            errorMessage: nil,
+            lastEventSequence: 1
+        )
+        let workspace = try CodexAgentWorkspace(
+            directoryURL: URL(fileURLWithPath: "/tmp")
+        )
+
+        try await coordinator.followUp(
+            prompt: "Add a regression test",
+            on: staleRunningTask,
+            in: workspace
+        )
+
+        let sentMethods = transport.sentMethods
+        let resumeIndex = try XCTUnwrap(sentMethods.firstIndex(of: "thread/resume"))
+        let turnStartIndex = try XCTUnwrap(sentMethods.lastIndex(of: "turn/start"))
+        XCTAssertLessThan(resumeIndex, turnStartIndex)
+        XCTAssertEqual(sentMethods.filter { $0 == "thread/read" }.count, 2)
+        XCTAssertFalse(sentMethods.contains("turn/steer"))
+    }
+
     private func makeClient(
         transport: MockCodexAppServerTransport,
         requestTimeoutNanoseconds: UInt64 = 15_000_000_000
@@ -1016,6 +1133,72 @@ private final class MockCodexAppServerTransport: CodexAppServerTransport, @unche
             let response = CodexAppServerOutgoingResponse(
                 id: requestID,
                 result: CodexAppServerCancelLoginResponse(status: .canceled)
+            )
+            currentMessageHandler?(try JSONEncoder().encode(response))
+        case "thread/read":
+            let response = CodexAppServerOutgoingResponse(
+                id: requestID,
+                result: CodexThreadReadResponse(
+                    thread: CodexThread(
+                        id: "thread_completed",
+                        sessionId: "session_completed",
+                        preview: "Completed task",
+                        name: nil,
+                        cwd: "/tmp",
+                        modelProvider: "openai",
+                        cliVersion: "0.144.2",
+                        createdAt: 1,
+                        updatedAt: 2,
+                        ephemeral: false,
+                        status: CodexThreadStatus(type: "idle", activeFlags: nil),
+                        turns: []
+                    )
+                )
+            )
+            currentMessageHandler?(try JSONEncoder().encode(response))
+        case "thread/resume":
+            let response = CodexAppServerOutgoingResponse(
+                id: requestID,
+                result: CodexThreadStartResponse(
+                    thread: CodexThread(
+                        id: "thread_completed",
+                        sessionId: "session_completed",
+                        preview: "Completed task",
+                        name: nil,
+                        cwd: "/tmp",
+                        modelProvider: "openai",
+                        cliVersion: "0.144.2",
+                        createdAt: 1,
+                        updatedAt: 2,
+                        ephemeral: false,
+                        status: CodexThreadStatus(type: "idle", activeFlags: nil),
+                        turns: []
+                    ),
+                    model: "gpt-5",
+                    modelProvider: "openai",
+                    cwd: "/tmp",
+                    approvalPolicy: .string("on-request"),
+                    approvalsReviewer: "user",
+                    sandbox: .string("workspace-write"),
+                    reasoningEffort: nil,
+                    instructionSources: nil
+                )
+            )
+            currentMessageHandler?(try JSONEncoder().encode(response))
+        case "turn/start":
+            let response = CodexAppServerOutgoingResponse(
+                id: requestID,
+                result: CodexTurnStartResponse(
+                    turn: CodexTurn(
+                        id: "turn_follow_up",
+                        status: .inProgress,
+                        items: [],
+                        startedAt: 3,
+                        completedAt: nil,
+                        durationMs: nil,
+                        error: nil
+                    )
+                )
             )
             currentMessageHandler?(try JSONEncoder().encode(response))
         default:

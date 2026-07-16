@@ -157,21 +157,25 @@ actor CodexAgentCoordinator {
         model: String? = nil,
         reasoningEffort: String? = nil
     ) async throws {
-        guard task.workspacePath == workspace.path else {
+        let currentTask = await taskStore.currentSnapshots().first(
+            where: { $0.threadID == task.threadID }
+        ) ?? task
+
+        guard currentTask.workspacePath == workspace.path else {
             throw CodexAgentCoordinatorError.workspaceMismatch(
-                expectedPath: task.workspacePath,
+                expectedPath: currentTask.workspacePath,
                 providedPath: workspace.path
             )
         }
 
-        if !task.status.isTerminal, let turnID = task.turnID {
-            guard !task.activities.contains(where: { activity in
+        if !currentTask.status.isTerminal, let turnID = currentTask.turnID {
+            guard !currentTask.activities.contains(where: { activity in
                 activity.kind == .contextCompaction
             }) else {
                 throw CodexAppServerError.threadBusyCompacting
             }
             _ = try await client.steerTurn(
-                threadID: task.threadID,
+                threadID: currentTask.threadID,
                 expectedTurnID: turnID,
                 prompt: prompt
             )
@@ -179,19 +183,19 @@ actor CodexAgentCoordinator {
         }
 
         _ = try await client.resumeThread(
-            threadID: task.threadID,
+            threadID: currentTask.threadID,
             in: workspace,
             model: model
         )
         let turnResponse = try await client.startTurn(
-            threadID: task.threadID,
+            threadID: currentTask.threadID,
             prompt: prompt,
             in: workspace,
             model: model,
             reasoningEffort: reasoningEffort
         )
         await taskStore.registerStartedTurn(
-            threadID: task.threadID,
+            threadID: currentTask.threadID,
             turn: turnResponse.turn
         )
     }
