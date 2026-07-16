@@ -31,6 +31,7 @@ final class AgentPresentationModel: ObservableObject {
     @Published private(set) var isAuthenticating = false
     @Published private(set) var authenticationCanStartAgain = false
     @Published private(set) var tokenLayoutRevision = 0
+    @Published private(set) var tokenOpenRevision = 0
     @Published private(set) var agentAttentionRequest: CodexAgentAttentionRequest?
     @Published var route: AgentHUDRoute = .overview
     @Published var isNotchExpanded = false
@@ -800,7 +801,10 @@ final class AgentPresentationModel: ObservableObject {
         }
     }
 
-    func showOverview() {
+    func showOverview(on displayIdentifier: CGDirectDisplayID? = nil) {
+        if displayIdentifier != nil {
+            tokenOpenRevision &+= 1
+        }
         route = .overview
         isNotchExpanded = true
     }
@@ -812,6 +816,7 @@ final class AgentPresentationModel: ObservableObject {
         if let displayIdentifier {
             displayIdentifierByThreadID[threadID] = displayIdentifier
             tokenLayoutRevision &+= 1
+            tokenOpenRevision &+= 1
         }
         route = .task(threadID: threadID)
         isNotchExpanded = true

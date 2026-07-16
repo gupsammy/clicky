@@ -36,7 +36,7 @@ struct AgentTokenRailView: View {
             let hiddenTaskCount = presentationModel.tasks(for: displayIdentifier).count - tasks.count
             if hiddenTaskCount > 0 {
                 Button {
-                    presentationModel.showOverview()
+                    presentationModel.showOverview(on: displayIdentifier)
                 } label: {
                     Text("+\(hiddenTaskCount) more")
                         .font(.system(size: 9, weight: .semibold))

@@ -117,7 +117,9 @@ struct AgentTaskDetailView: View {
                 Text("This agent is no longer in the current workspace.")
                     .font(.system(size: 12))
                     .foregroundColor(DS.Colors.textSecondary)
-                Button("Back to agents", action: presentationModel.showOverview)
+                Button("Back to agents") {
+                    presentationModel.showOverview()
+                }
                     .buttonStyle(.plain)
                     .foregroundColor(DS.Colors.accentText)
                     .pointerCursor()
@@ -128,7 +130,9 @@ struct AgentTaskDetailView: View {
 
     private func taskHeader(_ task: CodexAgentTaskSnapshot) -> some View {
         HStack(spacing: 12) {
-            Button(action: presentationModel.showOverview) {
+            Button {
+                presentationModel.showOverview()
+            } label: {
                 Image(systemName: "chevron.left")
                     .font(.system(size: 10, weight: .bold))
                     .frame(width: 28, height: 28)
