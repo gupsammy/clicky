@@ -229,6 +229,8 @@ enum CodexAppServerConnectionState: Equatable, Sendable {
 
 enum CodexAppServerError: LocalizedError, Equatable, Sendable {
     case executableNotFound
+    case invalidAgentWorkspace(path: String)
+    case emptyAgentPrompt
     case alreadyConnected
     case notConnected
     case malformedMessage
@@ -236,11 +238,16 @@ enum CodexAppServerError: LocalizedError, Equatable, Sendable {
     case requestTimedOut(method: String)
     case protocolFailure(code: Int, message: String)
     case processTerminated(exitCode: Int32, standardError: String)
+    case threadOutsideWorkspace(threadID: String, workspacePath: String)
 
     var errorDescription: String? {
         switch self {
         case .executableNotFound:
             return "Codex could not be found. Install the Codex app or ChatGPT, or bundle the Codex executable with Clicky."
+        case .invalidAgentWorkspace(let path):
+            return "The selected Agent Folder is not an existing directory: \(path)"
+        case .emptyAgentPrompt:
+            return "An agent prompt cannot be empty."
         case .alreadyConnected:
             return "Clicky is already connected to Codex app-server."
         case .notConnected:
@@ -259,6 +266,8 @@ enum CodexAppServerError: LocalizedError, Equatable, Sendable {
                 return "Codex app-server exited with status \(exitCode)."
             }
             return "Codex app-server exited with status \(exitCode): \(trimmedStandardError)"
+        case .threadOutsideWorkspace(let threadID, let workspacePath):
+            return "Thread \(threadID) does not belong to the selected Agent Folder: \(workspacePath)"
         }
     }
 }
