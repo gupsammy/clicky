@@ -112,8 +112,8 @@ final class OpenAIRealtimeTranscriptionProvider: BuddyTranscriptionProvider {
 
         let (responseData, response) = try await URLSession.shared.data(for: request)
 
-        guard let HTTPResponse = response as? HTTPURLResponse,
-              (200...299).contains(HTTPResponse.statusCode) else {
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200...299).contains(httpResponse.statusCode) else {
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
             throw OpenAIRealtimeTranscriptionProviderError(
                 message: "OpenAI Realtime token request failed with HTTP \(statusCode)."
@@ -139,9 +139,7 @@ final class OpenAIRealtimeTranscriptionProvider: BuddyTranscriptionProvider {
 
 private final class OpenAIRealtimeTranscriptionSession: BuddyStreamingTranscriptionSession, @unchecked Sendable {
     private static let targetSampleRate = 24_000.0
-    private static let webSocketURL = URL(
-        string: "wss://api.openai.com/v1/realtime?model=gpt-realtime-whisper"
-    )!
+    private static let handshakeTimeoutSeconds: TimeInterval = 10.0
 
     let finalTranscriptFallbackDelaySeconds: TimeInterval = 6.0
 
@@ -189,7 +187,7 @@ private final class OpenAIRealtimeTranscriptionSession: BuddyStreamingTranscript
     }
 
     func open() async throws {
-        var webSocketRequest = URLRequest(url: Self.webSocketURL)
+        var webSocketRequest = URLRequest(url: transcriptionConfiguration.webSocketURL)
         webSocketRequest.setValue(
             "Bearer \(ephemeralToken)",
             forHTTPHeaderField: "Authorization"
@@ -210,6 +208,23 @@ private final class OpenAIRealtimeTranscriptionSession: BuddyStreamingTranscript
                     self.sendEventData(sessionUpdateEventData)
                 } catch {
                     self.failSession(with: error)
+                }
+
+                // A server that accepts the connection but never sends
+                // session.updated would otherwise hang this continuation
+                // forever: Task cancellation cannot interrupt a
+                // CheckedContinuation, and the dictation manager has no
+                // session handle to cancel until open() returns.
+                self.stateQueue.asyncAfter(
+                    deadline: .now() + Self.handshakeTimeoutSeconds
+                ) {
+                    guard !self.hasResolvedReadyContinuation, !self.isCancelled else {
+                        return
+                    }
+                    self.webSocketTask?.cancel(with: .goingAway, reason: nil)
+                    self.failSession(with: OpenAIRealtimeTranscriptionProviderError(
+                        message: "OpenAI Realtime session was not ready within \(Int(Self.handshakeTimeoutSeconds)) seconds."
+                    ))
                 }
             }
         }

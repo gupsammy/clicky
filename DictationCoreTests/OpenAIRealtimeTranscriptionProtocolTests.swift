@@ -23,6 +23,22 @@ import Testing
     #expect(input["turn_detection"] is NSNull)
 }
 
+@Test func webSocketURLRequestsTheConfiguredModel() {
+    let defaultConfiguration = OpenAIRealtimeTranscriptionConfiguration()
+    #expect(
+        defaultConfiguration.webSocketURL.absoluteString
+            == "wss://api.openai.com/v1/realtime?model=gpt-realtime-whisper"
+    )
+
+    let customModelConfiguration = OpenAIRealtimeTranscriptionConfiguration(
+        modelName: "gpt-future-transcribe"
+    )
+    #expect(
+        customModelConfiguration.webSocketURL.absoluteString
+            == "wss://api.openai.com/v1/realtime?model=gpt-future-transcribe"
+    )
+}
+
 @Test func audioAppendEventBase64EncodesPCM16Bytes() throws {
     let audioData = Data([0x00, 0x01, 0xFE, 0xFF])
     let eventData = try OpenAIRealtimeTranscriptionClientEventEncoder

@@ -23,6 +23,15 @@ public struct OpenAIRealtimeTranscriptionConfiguration: Sendable {
         self.delay = delay
     }
 
+    // The websocket URL must request the same model the session is configured
+    // for; deriving it here keeps modelName the single client-side source of
+    // truth instead of a hardcoded URL silently ignoring the configured model.
+    public var webSocketURL: URL {
+        var urlComponents = URLComponents(string: "wss://api.openai.com/v1/realtime")!
+        urlComponents.queryItems = [URLQueryItem(name: "model", value: modelName)]
+        return urlComponents.url!
+    }
+
     public func makeSessionUpdateEventData() throws -> Data {
         let event: [String: Any] = [
             "type": "session.update",

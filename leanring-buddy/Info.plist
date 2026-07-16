@@ -11,7 +11,7 @@
 	<key>VoiceTranscriptionProvider</key>
 	<string>openai-realtime</string>
 	<key>ClickyAPIProxyBaseURL</key>
-	<string>https://your-worker-name.your-subdomain.workers.dev</string>
+	<string>https://clicky-proxy.sg-claude-git.workers.dev</string>
 	<key>OpenAIRealtimeTranscriptionModel</key>
 	<string>gpt-realtime-whisper</string>
 	<key>OpenAIRealtimeTranscriptionDelay</key>
