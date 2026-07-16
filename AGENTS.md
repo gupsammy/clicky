@@ -134,6 +134,14 @@ npx wrangler secret put ANTHROPIC_API_KEY
 npx wrangler secret put ASSEMBLYAI_API_KEY
 npx wrangler secret put ELEVENLABS_API_KEY
 npx wrangler secret put OPENAI_API_KEY
+npx wrangler secret put CLICKY_PROXY_ACCESS_TOKEN
+
+# Store the same random 32+ character token for this app install.
+# Update the service name if the app's bundle identifier changes.
+security add-generic-password -U \
+  -s com.yourcompany.leanring-buddy.proxy-access-token \
+  -a clicky-worker-access \
+  -w '<same CLICKY_PROXY_ACCESS_TOKEN value>'
 
 # Deploy
 npx wrangler deploy
