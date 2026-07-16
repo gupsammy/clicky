@@ -53,6 +53,8 @@ Worker vars: `ELEVENLABS_VOICE_ID`, `VERTEX_PROJECT_ID`, `VERTEX_REGION`
 
 **Safe Agent Workspace**: Every thread start/resume and turn start requires an existing Agent Folder. Clicky reasserts `on-request`, user-reviewed approvals, and `workspace-write`; turns also send an explicit writable-root list containing only the selected folder and disable network access. Thread history is listed by exact `cwd`. The agent API supports start, resume, list, read, turn start, steer, and interrupt without exposing unrestricted defaults to callers.
 
+**Agent Task State**: `CodexAgentTaskStore` reduces the notification and server-request streams into concurrent snapshots keyed by thread. It assembles agent message deltas, tracks current and recent command/file/tool activities, preserves pending approvals by request ID, handles waiting-for-input and terminal states, and publishes newest-first HUD-ready snapshots. Per-turn presentation state resets when a durable thread starts another turn. Approval presence is authoritative across the two independently consumed streams, so out-of-order delivery cannot hide or resurrect an approval.
+
 ## Key Files
 
 | File | Lines | Purpose |
@@ -84,9 +86,12 @@ Worker vars: `ELEVENLABS_VOICE_ID`, `VERTEX_PROJECT_ID`, `VERTEX_REGION`
 | `AgentCore/CodexAppServerClient.swift` | ~320 | Actor that performs initialization and account discovery, correlates requests with timeouts, streams notifications and approval requests, and sends typed responses. |
 | `AgentCore/CodexAgentModels.swift` | ~254 | Validated Agent Folder, safe approval/sandbox settings, durable thread and turn models, request contracts, and typed lifecycle notifications. |
 | `AgentCore/CodexAgentClient.swift` | ~153 | Safe app-server thread and turn operations: start, resume, list, read, start turn, steer, and interrupt. |
+| `AgentCore/CodexAgentTaskModels.swift` | ~120 | HUD-independent task, activity, approval, and event models for concurrent agent progress. |
+| `AgentCore/CodexAgentTaskStore.swift` | ~582 | Actor reducer and stream monitor that converts Codex notifications and approval requests into bounded, concurrent task snapshots. |
 | `Package.swift` | ~27 | UI-independent Swift package harness for compiling and testing `AgentCore` without invoking Xcode or touching TCC permissions. |
 | `AgentCoreTests/CodexAppServerCoreTests.swift` | ~320 | Deterministic transport/protocol tests plus an opt-in live handshake against an installed, authenticated Codex app-server. |
 | `AgentCoreTests/CodexAgentThreadTests.swift` | ~510 | Wire-level safety tests for workspace scoping and durable thread/turn operations plus an opt-in ephemeral live thread test. |
+| `AgentCoreTests/CodexAgentTaskStoreTests.swift` | ~525 | Reducer tests for concurrency, deltas, activities, approvals, terminal states, multi-turn reset, ordering, and memory bounds. |
 | `.github/workflows/agent-core-tests.yml` | ~19 | Runs the UI-independent AgentCore suite with warnings treated as errors on macOS pull requests and main pushes. |
 | `worker/src/index.ts` | ~142 | Cloudflare Worker proxy. Three routes: `/chat` (Claude), `/tts` (ElevenLabs), `/transcribe-token` (AssemblyAI temp token). |
 
