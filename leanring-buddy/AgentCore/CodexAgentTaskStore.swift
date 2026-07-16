@@ -380,9 +380,16 @@ actor CodexAgentTaskStore {
         )
         if !taskState.status.isTerminal {
             let streamedStatus = taskStatus(fromThreadStatus: parameters.status)
-            taskState.status = taskState.approvalOrder.isEmpty
-                ? streamedStatus
-                : .waitingForApproval
+            if streamedStatus.isTerminal {
+                resolvedServerRequestIDs.formUnion(taskState.approvalOrder)
+                taskState.approvalsByRequestID.removeAll()
+                taskState.approvalOrder.removeAll()
+                taskState.status = streamedStatus
+            } else {
+                taskState.status = taskState.approvalOrder.isEmpty
+                    ? streamedStatus
+                    : .waitingForApproval
+            }
         }
         taskState.lastEventSequence = takeNextEventSequence()
         taskStatesByThreadID[parameters.threadId] = taskState

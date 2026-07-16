@@ -195,6 +195,42 @@ final class CodexAgentTaskStoreTests: XCTestCase {
         XCTAssertEqual(snapshot.status, .waitingForInput)
     }
 
+    func testSystemErrorOverridesAndTombstonesPendingApproval() async throws {
+        let store = CodexAgentTaskStore()
+        let thread = makeThread(id: "thread_1", preview: "Failing task")
+        await store.register(thread: thread)
+
+        let approvalRequest = CodexAppServerRequest(
+            id: .integer(27),
+            method: "item/commandExecution/requestApproval",
+            params: .object([
+                "threadId": .string(thread.id),
+                "turnId": .string("turn_1"),
+                "itemId": .string("command_1"),
+                "command": .string("swift test")
+            ])
+        )
+        await store.apply(serverRequest: approvalRequest)
+        await store.apply(
+            notification: try notification(
+                method: "thread/status/changed",
+                parameters: CodexAgentThreadStatusChangedNotification(
+                    threadId: thread.id,
+                    status: CodexThreadStatus(
+                        type: "systemError",
+                        activeFlags: nil
+                    )
+                )
+            )
+        )
+        await store.apply(serverRequest: approvalRequest)
+
+        let currentSnapshots = await store.currentSnapshots()
+        let snapshot = try XCTUnwrap(currentSnapshots.first)
+        XCTAssertEqual(snapshot.status, .failed)
+        XCTAssertTrue(snapshot.pendingApprovals.isEmpty)
+    }
+
     func testConcurrentThreadsKeepMessagesAndStatusesIsolated() async throws {
         let store = CodexAgentTaskStore()
         let firstThread = makeThread(id: "thread_1", preview: "First")
