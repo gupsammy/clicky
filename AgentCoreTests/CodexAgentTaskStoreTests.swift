@@ -429,6 +429,63 @@ final class CodexAgentTaskStoreTests: XCTestCase {
         XCTAssertTrue(snapshot.pendingApprovals.isEmpty)
     }
 
+    func testStaleApprovalForACompletedTurnCannotRollBackTheNextTurn() async throws {
+        let store = CodexAgentTaskStore()
+        let thread = makeThread(id: "thread_1", preview: "Stale approval replay")
+        await store.register(thread: thread)
+
+        let firstTurnApprovalRequest = CodexAppServerRequest(
+            id: .integer(88),
+            method: "item/commandExecution/requestApproval",
+            params: .object([
+                "threadId": .string(thread.id),
+                "turnId": .string("turn_1"),
+                "itemId": .string("command_1"),
+                "command": .string("swift build")
+            ])
+        )
+
+        await store.apply(
+            notification: try notification(
+                method: "turn/started",
+                parameters: CodexTurnLifecycleNotification(
+                    threadId: thread.id,
+                    turn: makeTurn(id: "turn_1", status: .inProgress)
+                )
+            )
+        )
+        await store.apply(serverRequest: firstTurnApprovalRequest)
+        await store.resolveApproval(requestID: firstTurnApprovalRequest.id)
+        await store.apply(
+            notification: try notification(
+                method: "turn/completed",
+                parameters: CodexTurnLifecycleNotification(
+                    threadId: thread.id,
+                    turn: makeTurn(id: "turn_1", status: .completed)
+                )
+            )
+        )
+        await store.apply(
+            notification: try notification(
+                method: "turn/started",
+                parameters: CodexTurnLifecycleNotification(
+                    threadId: thread.id,
+                    turn: makeTurn(id: "turn_2", status: .inProgress)
+                )
+            )
+        )
+
+        // A duplicate delivery of turn 1's already-resolved approval arrives
+        // while turn 2 is actively running.
+        await store.apply(serverRequest: firstTurnApprovalRequest)
+
+        let currentSnapshots = await store.currentSnapshots()
+        let snapshot = try XCTUnwrap(currentSnapshots.first)
+        XCTAssertEqual(snapshot.turnID, "turn_2")
+        XCTAssertEqual(snapshot.status, .running)
+        XCTAssertTrue(snapshot.pendingApprovals.isEmpty)
+    }
+
     func testMalformedAndUnknownEventsDoNotCreateTasks() async {
         let store = CodexAgentTaskStore()
 

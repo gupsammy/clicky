@@ -20,6 +20,10 @@ actor CodexAgentTaskStore {
     private struct MutableTaskState {
         let threadID: String
         var turnID: String?
+        // Turn IDs that have already reached turn/completed on this thread.
+        // Used to reject stale or duplicate approval deliveries for finished
+        // turns without blocking legitimate early approvals for a new turn.
+        var completedTurnIDs: Set<String>
         var workspacePath: String
         var title: String
         var status: CodexAgentTaskStatus
@@ -103,7 +107,7 @@ actor CodexAgentTaskStore {
             title ?? thread.name ?? thread.preview,
             fallback: "Agent task"
         )
-        taskState.status = taskStatus(from: thread.status)
+        taskState.status = taskStatus(fromThreadStatus: thread.status)
         taskState.lastEventSequence = takeNextEventSequence()
         taskStatesByThreadID[thread.id] = taskState
         publishSnapshots()
@@ -158,6 +162,14 @@ actor CodexAgentTaskStore {
         )
         if taskState.status.isTerminal,
            taskState.turnID == turnID {
+            return
+        }
+        // A stale or duplicate approval delivery for an already-completed turn
+        // must not roll the task back to that turn or resurrect a resolved
+        // approval. Matching on completed turn IDs (rather than "any turn other
+        // than the current one") keeps legitimate early approvals — ones that
+        // arrive just before their own turn/started — working.
+        if taskState.completedTurnIDs.contains(turnID) {
             return
         }
         taskState.turnID = turnID
@@ -238,7 +250,8 @@ actor CodexAgentTaskStore {
             threadID: parameters.threadId
         )
         taskState.turnID = parameters.turn.id
-        taskState.status = taskStatus(from: parameters.turn.status)
+        taskState.completedTurnIDs.insert(parameters.turn.id)
+        taskState.status = taskStatus(fromTurnStatus: parameters.turn.status)
         taskState.errorMessage = parameters.turn.error?.message
         finalizeRunningActivities(
             in: &taskState,
@@ -332,7 +345,7 @@ actor CodexAgentTaskStore {
             threadID: parameters.threadId
         )
         if !taskState.status.isTerminal {
-            let streamedStatus = taskStatus(from: parameters.status)
+            let streamedStatus = taskStatus(fromThreadStatus: parameters.status)
             taskState.status = taskState.approvalOrder.isEmpty
                 ? streamedStatus
                 : .waitingForApproval
@@ -346,6 +359,7 @@ actor CodexAgentTaskStore {
         MutableTaskState(
             threadID: threadID,
             turnID: nil,
+            completedTurnIDs: [],
             workspacePath: "",
             title: "Agent task",
             status: .queued,
@@ -360,7 +374,7 @@ actor CodexAgentTaskStore {
         )
     }
 
-    private func taskStatus(from threadStatus: CodexThreadStatus) -> CodexAgentTaskStatus {
+    private func taskStatus(fromThreadStatus threadStatus: CodexThreadStatus) -> CodexAgentTaskStatus {
         if threadStatus.activeFlags?.contains("waitingOnApproval") == true {
             return .waitingForApproval
         }
@@ -378,7 +392,7 @@ actor CodexAgentTaskStore {
         }
     }
 
-    private func taskStatus(from turnStatus: CodexTurnStatus) -> CodexAgentTaskStatus {
+    private func taskStatus(fromTurnStatus turnStatus: CodexTurnStatus) -> CodexAgentTaskStatus {
         switch turnStatus {
         case .completed:
             return .completed
