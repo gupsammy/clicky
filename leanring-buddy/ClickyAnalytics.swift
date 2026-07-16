@@ -150,27 +150,82 @@ enum ClickyAnalytics {
         ])
     }
 
-    /// Claude's response included a [POINT:x,y:label] coordinate tag,
-    /// so the buddy is flying to point at a UI element.
-    static func trackElementPointed(elementLabel: String?) {
-        PostHogSDK.shared.capture("element_pointed", properties: [
-            "element_label": elementLabel ?? "unknown"
-        ])
+    /// Claude's response included a coordinate tag, so the buddy is flying to
+    /// point at a UI element. The label is screen-derived content and must not
+    /// leave the device.
+    static func trackElementPointed() {
+        PostHogSDK.shared.capture("element_pointed")
     }
 
     // MARK: - Errors
 
     /// An error occurred during the AI response pipeline.
-    static func trackResponseError(error: String) {
-        PostHogSDK.shared.capture("response_error", properties: [
-            "error": error
-        ])
+    static func trackResponseError(error: Error) {
+        PostHogSDK.shared.capture(
+            "response_error",
+            properties: privacyPreservingErrorProperties(for: error)
+        )
     }
 
     /// An error occurred during TTS playback.
-    static func trackTTSError(error: String) {
-        PostHogSDK.shared.capture("tts_error", properties: [
-            "error": error
-        ])
+    static func trackTTSError(error: Error) {
+        PostHogSDK.shared.capture(
+            "tts_error",
+            properties: privacyPreservingErrorProperties(for: error)
+        )
+    }
+
+    /// Converts arbitrary upstream errors into a small, enumerable analytics
+    /// vocabulary. Never include localized descriptions because upstream
+    /// response bodies can contain user or screen-derived content.
+    private static func privacyPreservingErrorProperties(for error: Error) -> [String: Any] {
+        let nsError = error as NSError
+        var properties: [String: Any] = [
+            "category": errorCategory(for: nsError)
+        ]
+
+        if (100...599).contains(nsError.code),
+           ["ClaudeAPI", "OpenAIAPI", "ElevenLabsTTS"].contains(nsError.domain) {
+            properties["http_status_code"] = nsError.code
+        }
+
+        return properties
+    }
+
+    private static func errorCategory(for error: NSError) -> String {
+        if error.domain == NSURLErrorDomain {
+            switch error.code {
+            case NSURLErrorCancelled:
+                return "cancelled"
+            case NSURLErrorTimedOut:
+                return "timeout"
+            default:
+                return "network"
+            }
+        }
+
+        if (100...599).contains(error.code) {
+            switch error.code {
+            case 401, 403:
+                return "authentication"
+            case 408:
+                return "timeout"
+            case 429:
+                return "rate_limit"
+            case 400...499:
+                return "request"
+            case 500...599:
+                return "upstream"
+            default:
+                break
+            }
+        }
+
+        switch error.code {
+        case -1:
+            return "invalid_response"
+        default:
+            return "other"
+        }
     }
 }

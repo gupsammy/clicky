@@ -47,7 +47,7 @@ final class AssemblyAIStreamingTranscriptionProvider: BuddyTranscriptionProvider
     ) async throws -> any BuddyStreamingTranscriptionSession {
         // Fetch a fresh temporary token from the proxy before each session
         let temporaryToken = try await fetchTemporaryToken()
-        print("🎙️ AssemblyAI: fetched temporary token (\(temporaryToken.prefix(20))...)")
+        print("🎙️ AssemblyAI: temporary credential ready")
 
         let session = AssemblyAIStreamingTranscriptionSession(
             apiKey: nil,
@@ -69,14 +69,24 @@ final class AssemblyAIStreamingTranscriptionProvider: BuddyTranscriptionProvider
         request.httpMethod = "POST"
         try ClickyProxyAuthorization.authorize(&request)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let data: Data
+        let response: URLResponse
+
+        do {
+            (data, response) = try await URLSession.shared.data(for: request)
+        } catch {
+            // URLSession errors can include the full request URL. That URL must
+            // never escape because streaming credentials live in query items.
+            throw AssemblyAIStreamingTranscriptionProviderError(
+                message: "AssemblyAI token request failed (network)."
+            )
+        }
 
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
-            let body = String(data: data, encoding: .utf8) ?? "unknown"
             throw AssemblyAIStreamingTranscriptionProviderError(
-                message: "Failed to fetch AssemblyAI token (HTTP \(statusCode)): \(body)"
+                message: "AssemblyAI token request failed (HTTP \(statusCode))."
             )
         }
 
@@ -102,12 +112,6 @@ private final class AssemblyAIStreamingTranscriptionSession: NSObject, BuddyStre
         let turn_order: Int?
         let end_of_turn: Bool?
         let turn_is_formatted: Bool?
-    }
-
-    private struct ErrorMessage: Decodable {
-        let type: String
-        let error: String?
-        let message: String?
     }
 
     private struct StoredTurnTranscript {
@@ -195,8 +199,8 @@ private final class AssemblyAIStreamingTranscriptionSession: NSObject, BuddyStre
         sendQueue.async { [weak self] in
             guard let self, let webSocketTask = self.webSocketTask else { return }
             webSocketTask.send(.data(audioPCM16Data)) { [weak self] error in
-                if let error {
-                    self?.failSession(with: error)
+                if error != nil {
+                    self?.failSession(category: .connection)
                 }
             }
         }
@@ -240,8 +244,8 @@ private final class AssemblyAIStreamingTranscriptionSession: NSObject, BuddyStre
                 }
 
                 self.receiveNextMessage()
-            case .failure(let error):
-                self.failSession(with: error)
+            case .failure:
+                self.failSession(category: .connection)
             }
         }
     }
@@ -266,14 +270,14 @@ private final class AssemblyAIStreamingTranscriptionSession: NSObject, BuddyStre
                     }
                 }
             case "error":
-                let errorMessage = try JSONDecoder().decode(ErrorMessage.self, from: messageData)
-                let messageText = errorMessage.error ?? errorMessage.message ?? "AssemblyAI returned an error."
-                failSession(with: AssemblyAIStreamingTranscriptionProviderError(message: messageText))
+                // Provider messages are intentionally not surfaced. They can
+                // echo URL query items such as the temporary token or keyterms.
+                failSession(category: .serviceRejectedSession)
             default:
                 break
             }
         } catch {
-            failSession(with: error)
+            failSession(category: .invalidResponse)
         }
     }
 
@@ -389,28 +393,63 @@ private final class AssemblyAIStreamingTranscriptionSession: NSObject, BuddyStre
         sendQueue.async { [weak self] in
             guard let self, let webSocketTask = self.webSocketTask else { return }
             webSocketTask.send(.string(jsonString)) { [weak self] error in
-                if let error {
-                    self?.failSession(with: error)
+                if error != nil {
+                    self?.failSession(category: .connection)
                 }
             }
         }
     }
 
-    private func failSession(with error: Error) {
-        resolveReadyContinuationIfNeeded(with: .failure(error))
+    private enum FailureCategory {
+        case connection
+        case invalidResponse
+        case serviceRejectedSession
+
+        var safeError: AssemblyAIStreamingTranscriptionProviderError {
+            switch self {
+            case .connection:
+                return AssemblyAIStreamingTranscriptionProviderError(
+                    message: "AssemblyAI streaming connection failed."
+                )
+            case .invalidResponse:
+                return AssemblyAIStreamingTranscriptionProviderError(
+                    message: "AssemblyAI streaming response was invalid."
+                )
+            case .serviceRejectedSession:
+                return AssemblyAIStreamingTranscriptionProviderError(
+                    message: "AssemblyAI streaming service rejected the session."
+                )
+            }
+        }
+
+        var logLabel: String {
+            switch self {
+            case .connection:
+                return "connection"
+            case .invalidResponse:
+                return "response"
+            case .serviceRejectedSession:
+                return "provider"
+            }
+        }
+    }
+
+    private func failSession(category: FailureCategory) {
+        let safeError = category.safeError
+        resolveReadyContinuationIfNeeded(with: .failure(safeError))
         stateQueue.async {
             let latestTranscriptText = self.bestAvailableTranscriptText()
 
             if self.isAwaitingExplicitFinalTranscript
                 && !self.hasDeliveredFinalTranscript
                 && !latestTranscriptText.isEmpty {
-                print("[AssemblyAI] ⚠️ WebSocket error during active session, delivering partial transcript as fallback: \(error.localizedDescription)")
+                print("[AssemblyAI] ⚠️ Streaming connection ended; delivering the available partial transcript")
                 self.deliverFinalTranscriptIfNeeded(latestTranscriptText)
                 return
             }
-            print("[AssemblyAI] ❌ Session failed with error: \(error.localizedDescription)")
+            print("[AssemblyAI] ❌ Session failed (\(category.logLabel))")
 
-            self.onError(error)
+            self.onError(safeError)
         }
     }
 

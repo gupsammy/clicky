@@ -31,6 +31,8 @@ struct leanring_buddyApp: App {
 final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private var menuBarPanelManager: MenuBarPanelManager?
     private let companionManager = CompanionManager()
+    private let agentPresentationModel = AgentPresentationModel()
+    private var agentHUDWindowManager: AgentHUDWindowManager?
     private var sparkleUpdaterController: SPUStandardUpdaterController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -43,7 +45,12 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
         ClickyAnalytics.trackAppOpened()
 
         menuBarPanelManager = MenuBarPanelManager(companionManager: companionManager)
+        agentHUDWindowManager = AgentHUDWindowManager(
+            presentationModel: agentPresentationModel
+        )
         companionManager.start()
+        agentPresentationModel.start()
+        agentHUDWindowManager?.show()
         // Auto-open the panel if the user still needs to do something:
         // either they haven't onboarded yet, or permissions were revoked.
         if !companionManager.hasCompletedOnboarding || !companionManager.allPermissionsGranted {
@@ -55,6 +62,8 @@ final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         companionManager.stop()
+        agentPresentationModel.stop()
+        agentHUDWindowManager?.hide()
     }
 
     /// Registers the app as a login item so it launches automatically on

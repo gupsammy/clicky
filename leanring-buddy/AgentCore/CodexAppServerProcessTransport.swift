@@ -29,6 +29,139 @@ struct CodexJSONLineFramer {
 
         return completeLines
     }
+
+    mutating func finish() -> Data? {
+        var finalLineData = bufferedData
+        bufferedData.removeAll(keepingCapacity: true)
+
+        if finalLineData.last == 0x0D {
+            finalLineData.removeLast()
+        }
+
+        return finalLineData.isEmpty ? nil : finalLineData
+    }
+}
+
+enum CodexChildProcessEnvironment {
+    private static let standardExecutableDirectories = [
+        "/opt/homebrew/bin",
+        "/usr/local/bin"
+    ]
+
+    static func augmentingPath(
+        environment: [String: String],
+        homeDirectoryURL: URL
+    ) -> [String: String] {
+        var augmentedEnvironment = environment
+        var executableDirectories = environment["PATH"]?
+            .components(separatedBy: ":") ?? []
+
+        executableDirectories.append(contentsOf: standardExecutableDirectories)
+        executableDirectories.append(
+            homeDirectoryURL.appendingPathComponent(".npm-global/bin").path
+        )
+
+        var seenExecutableDirectories = Set<String>()
+        augmentedEnvironment["PATH"] = executableDirectories
+            .filter { seenExecutableDirectories.insert($0).inserted }
+            .joined(separator: ":")
+        return augmentedEnvironment
+    }
+}
+
+enum CodexProcessStandardError {
+    static let maximumCapturedByteCount = 4_096
+
+    static func appendingTail(
+        _ incomingData: Data,
+        to existingData: Data,
+        maximumByteCount: Int = maximumCapturedByteCount
+    ) -> Data {
+        guard maximumByteCount > 0 else { return Data() }
+        if incomingData.count >= maximumByteCount {
+            return Data(incomingData.suffix(maximumByteCount))
+        }
+
+        var capturedData = existingData
+        let overflowByteCount = capturedData.count + incomingData.count - maximumByteCount
+        if overflowByteCount > 0 {
+            capturedData.removeFirst(overflowByteCount)
+        }
+        capturedData.append(incomingData)
+        return capturedData
+    }
+
+    static func sanitizedText(from capturedData: Data) -> String {
+        let decodedText = String(decoding: capturedData, as: UTF8.self)
+        let unicodeScalars = Array(decodedText.unicodeScalars)
+        var sanitizedScalars = String.UnicodeScalarView()
+        var scalarIndex = 0
+
+        while scalarIndex < unicodeScalars.count {
+            let scalarValue = unicodeScalars[scalarIndex].value
+
+            if scalarValue == 0x1B {
+                scalarIndex = indexAfterEscapeSequence(
+                    in: unicodeScalars,
+                    startingAt: scalarIndex
+                )
+                continue
+            }
+
+            let isAllowedWhitespace = scalarValue == 0x09
+                || scalarValue == 0x0A
+                || scalarValue == 0x0D
+            if isAllowedWhitespace || (scalarValue >= 0x20 && scalarValue != 0x7F) {
+                sanitizedScalars.append(unicodeScalars[scalarIndex])
+            }
+            scalarIndex += 1
+        }
+
+        return String(sanitizedScalars)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func indexAfterEscapeSequence(
+        in unicodeScalars: [UnicodeScalar],
+        startingAt escapeIndex: Int
+    ) -> Int {
+        let introducerIndex = escapeIndex + 1
+        guard introducerIndex < unicodeScalars.count else {
+            return introducerIndex
+        }
+
+        switch unicodeScalars[introducerIndex].value {
+        case 0x5B: // Control Sequence Introducer: ESC [ ... final-byte
+            var scalarIndex = introducerIndex + 1
+            while scalarIndex < unicodeScalars.count {
+                let scalarValue = unicodeScalars[scalarIndex].value
+                scalarIndex += 1
+                if (0x40...0x7E).contains(scalarValue) {
+                    break
+                }
+            }
+            return scalarIndex
+
+        case 0x5D: // Operating System Command: ESC ] ... BEL or ESC \
+            var scalarIndex = introducerIndex + 1
+            while scalarIndex < unicodeScalars.count {
+                let scalarValue = unicodeScalars[scalarIndex].value
+                if scalarValue == 0x07 {
+                    return scalarIndex + 1
+                }
+                if scalarValue == 0x1B,
+                   scalarIndex + 1 < unicodeScalars.count,
+                   unicodeScalars[scalarIndex + 1].value == 0x5C {
+                    return scalarIndex + 2
+                }
+                scalarIndex += 1
+            }
+            return scalarIndex
+
+        default:
+            return introducerIndex + 1
+        }
+    }
 }
 
 enum CodexExecutableLocator {
@@ -78,8 +211,6 @@ enum CodexExecutableLocator {
 }
 
 final class CodexAppServerProcessTransport: CodexAppServerTransport, @unchecked Sendable {
-    private static let maximumCapturedStandardErrorBytes = 65_536
-
     private let executableURL: URL
     private let stateLock = NSLock()
 
@@ -92,6 +223,7 @@ final class CodexAppServerProcessTransport: CodexAppServerTransport, @unchecked 
     private var onMessage: (@Sendable (Data) -> Void)?
     private var onTermination: (@Sendable (CodexAppServerError) -> Void)?
     private var isStoppingIntentionally = false
+    private var isFinalizingProcessTermination = false
 
     init(executableURL: URL) {
         self.executableURL = executableURL
@@ -117,6 +249,10 @@ final class CodexAppServerProcessTransport: CodexAppServerTransport, @unchecked 
         process.standardInput = standardInputPipe
         process.standardOutput = standardOutputPipe
         process.standardError = standardErrorPipe
+        process.environment = CodexChildProcessEnvironment.augmentingPath(
+            environment: ProcessInfo.processInfo.environment,
+            homeDirectoryURL: FileManager.default.homeDirectoryForCurrentUser
+        )
 
         // If the app-server dies between send()'s liveness check and the actual
         // stdin write, writing to a pipe with no reader raises SIGPIPE, which
@@ -137,18 +273,15 @@ final class CodexAppServerProcessTransport: CodexAppServerTransport, @unchecked 
         self.onMessage = onMessage
         self.onTermination = onTermination
         self.isStoppingIntentionally = false
+        self.isFinalizingProcessTermination = false
         stateLock.unlock()
 
         standardOutputPipe.fileHandleForReading.readabilityHandler = { [weak self] fileHandle in
-            let availableData = fileHandle.availableData
-            guard !availableData.isEmpty else { return }
-            self?.receiveStandardOutput(availableData, from: fileHandle)
+            self?.receiveAvailableStandardOutput(from: fileHandle)
         }
 
         standardErrorPipe.fileHandleForReading.readabilityHandler = { [weak self] fileHandle in
-            let availableData = fileHandle.availableData
-            guard !availableData.isEmpty else { return }
-            self?.receiveStandardError(availableData, from: fileHandle)
+            self?.receiveAvailableStandardError(from: fileHandle)
         }
 
         process.terminationHandler = { [weak self] terminatedProcess in
@@ -203,38 +336,51 @@ final class CodexAppServerProcessTransport: CodexAppServerTransport, @unchecked 
         }
     }
 
-    private func receiveStandardOutput(
-        _ incomingData: Data,
-        from originatingFileHandle: FileHandle
-    ) {
+    private func receiveAvailableStandardOutput(from fileHandle: FileHandle) {
         stateLock.lock()
-        guard standardOutputPipe?.fileHandleForReading === originatingFileHandle else {
+        guard !isFinalizingProcessTermination,
+              standardOutputPipe?.fileHandleForReading === fileHandle else {
             stateLock.unlock()
             return
         }
+
+        let incomingData = fileHandle.availableData
+        guard !incomingData.isEmpty else {
+            stateLock.unlock()
+            return
+        }
+
         let completeMessages = jsonLineFramer.append(incomingData)
         let messageHandler = onMessage
-        stateLock.unlock()
-
         for completeMessage in completeMessages {
             messageHandler?(completeMessage)
         }
+        stateLock.unlock()
     }
 
-    private func receiveStandardError(
-        _ incomingData: Data,
-        from originatingFileHandle: FileHandle
-    ) {
+    private func receiveAvailableStandardError(from fileHandle: FileHandle) {
         stateLock.lock()
-        guard standardErrorPipe?.fileHandleForReading === originatingFileHandle else {
+        guard !isFinalizingProcessTermination,
+              standardErrorPipe?.fileHandleForReading === fileHandle else {
             stateLock.unlock()
             return
         }
-        let availableByteCount = Self.maximumCapturedStandardErrorBytes - standardErrorData.count
-        if availableByteCount > 0 {
-            standardErrorData.append(incomingData.prefix(availableByteCount))
+
+        let incomingData = fileHandle.availableData
+        guard !incomingData.isEmpty else {
+            stateLock.unlock()
+            return
         }
+
+        appendStandardError(incomingData)
         stateLock.unlock()
+    }
+
+    private func appendStandardError(_ incomingData: Data) {
+        standardErrorData = CodexProcessStandardError.appendingTail(
+            incomingData,
+            to: standardErrorData
+        )
     }
 
     private func processDidTerminate(_ terminatedProcess: Process) {
@@ -243,11 +389,42 @@ final class CodexAppServerProcessTransport: CodexAppServerTransport, @unchecked 
             stateLock.unlock()
             return
         }
-        let shouldReportTermination = !isStoppingIntentionally
-        let terminationHandler = onTermination
-        let capturedStandardError = String(data: standardErrorData, encoding: .utf8) ?? ""
+
+        // Stop readability callbacks from consuming bytes while this method drains EOF.
+        // Any callback already handling data holds stateLock and completes before this phase.
+        isFinalizingProcessTermination = true
         let outputHandle = standardOutputPipe?.fileHandleForReading
         let errorHandle = standardErrorPipe?.fileHandleForReading
+        outputHandle?.readabilityHandler = nil
+        errorHandle?.readabilityHandler = nil
+        stateLock.unlock()
+
+        let finalStandardOutputData = (try? outputHandle?.readToEnd()) ?? nil
+        let finalStandardErrorData = (try? errorHandle?.readToEnd()) ?? nil
+
+        stateLock.lock()
+        guard process === terminatedProcess else {
+            stateLock.unlock()
+            return
+        }
+
+        var finalMessages: [Data] = []
+        if let finalStandardOutputData, !finalStandardOutputData.isEmpty {
+            finalMessages.append(contentsOf: jsonLineFramer.append(finalStandardOutputData))
+        }
+        if let unterminatedFinalMessage = jsonLineFramer.finish() {
+            finalMessages.append(unterminatedFinalMessage)
+        }
+        if let finalStandardErrorData, !finalStandardErrorData.isEmpty {
+            appendStandardError(finalStandardErrorData)
+        }
+
+        let shouldReportTermination = !isStoppingIntentionally
+        let messageHandler = onMessage
+        let terminationHandler = onTermination
+        let capturedStandardError = CodexProcessStandardError.sanitizedText(
+            from: standardErrorData
+        )
         process = nil
         standardInputPipe = nil
         standardOutputPipe = nil
@@ -256,8 +433,9 @@ final class CodexAppServerProcessTransport: CodexAppServerTransport, @unchecked 
         onTermination = nil
         stateLock.unlock()
 
-        outputHandle?.readabilityHandler = nil
-        errorHandle?.readabilityHandler = nil
+        for finalMessage in finalMessages {
+            messageHandler?(finalMessage)
+        }
 
         if shouldReportTermination {
             terminationHandler?(
@@ -279,6 +457,7 @@ final class CodexAppServerProcessTransport: CodexAppServerTransport, @unchecked 
         standardErrorPipe = nil
         onMessage = nil
         onTermination = nil
+        isFinalizingProcessTermination = false
         stateLock.unlock()
 
         outputHandle?.readabilityHandler = nil

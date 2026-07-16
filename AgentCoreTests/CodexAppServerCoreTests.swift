@@ -22,6 +22,72 @@ final class CodexAppServerCoreTests: XCTestCase {
         )
     }
 
+    func testJSONLineFramerFinishesAnUnterminatedFinalMessage() {
+        var framer = CodexJSONLineFramer()
+
+        XCTAssertTrue(framer.append(Data("{\"method\":\"turn/completed\"}".utf8)).isEmpty)
+        XCTAssertEqual(
+            framer.finish().flatMap { String(data: $0, encoding: .utf8) },
+            "{\"method\":\"turn/completed\"}"
+        )
+        XCTAssertNil(framer.finish())
+    }
+
+    func testChildProcessEnvironmentPreservesAndDeduplicatesPath() {
+        let augmentedEnvironment = CodexChildProcessEnvironment.augmentingPath(
+            environment: [
+                "PATH": "/custom/bin:/opt/homebrew/bin:/custom/bin",
+                "CLICKY_TEST_VALUE": "preserved"
+            ],
+            homeDirectoryURL: URL(fileURLWithPath: "/Users/clicky")
+        )
+
+        XCTAssertEqual(augmentedEnvironment["CLICKY_TEST_VALUE"], "preserved")
+        XCTAssertEqual(
+            augmentedEnvironment["PATH"],
+            "/custom/bin:/opt/homebrew/bin:/usr/local/bin:/Users/clicky/.npm-global/bin"
+        )
+    }
+
+    func testStandardErrorCaptureKeepsOnlyTheBoundedTail() {
+        let historicalData = Data("historical-auth-error".utf8)
+        let recentData = Data("recent-crash-detail".utf8)
+
+        let capturedData = CodexProcessStandardError.appendingTail(
+            recentData,
+            to: historicalData,
+            maximumByteCount: recentData.count + 3
+        )
+
+        XCTAssertEqual(capturedData.count, recentData.count + 3)
+        XCTAssertEqual(String(decoding: capturedData.suffix(recentData.count), as: UTF8.self), "recent-crash-detail")
+        XCTAssertFalse(String(decoding: capturedData, as: UTF8.self).contains("historical"))
+    }
+
+    func testStandardErrorSanitizationRemovesTerminalAndControlSequences() {
+        let capturedData = Data(
+            "\u{001B}[31mrecent failure\u{001B}[0m\u{0000}\n\u{001B}]0;private title\u{0007}tail".utf8
+        )
+
+        XCTAssertEqual(
+            CodexProcessStandardError.sanitizedText(from: capturedData),
+            "recent failure\ntail"
+        )
+    }
+
+    func testProcessTerminationDescriptionDoesNotExposeDiagnosticOutput() {
+        let error = CodexAppServerError.processTerminated(
+            exitCode: 9,
+            standardError: "MCP authorization failed for private-account@example.com"
+        )
+
+        XCTAssertEqual(
+            error.localizedDescription,
+            "Codex app-server stopped unexpectedly (status 9)."
+        )
+        XCTAssertFalse(error.localizedDescription.contains("private-account"))
+    }
+
     func testProcessTransportIgnoresTerminationFromStoppedProcessAfterRestart() throws {
         let temporaryDirectoryURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -86,6 +152,92 @@ final class CodexAppServerCoreTests: XCTestCase {
         transport.stop()
     }
 
+    func testProcessTransportDeliversFinalStandardOutputBeforeTermination() throws {
+        let temporaryDirectoryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: temporaryDirectoryURL,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: temporaryDirectoryURL) }
+
+        let executableURL = temporaryDirectoryURL.appendingPathComponent("terminal-message.sh")
+        let terminalMessage = "{\"method\":\"turn/completed\"}"
+        let script = "#!/bin/sh\nprintf '%s' '\(terminalMessage)'\n"
+        try Data(script.utf8).write(to: executableURL)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: executableURL.path
+        )
+
+        let messageExpectation = expectation(description: "final stdout message")
+        let terminationExpectation = expectation(description: "process termination")
+        let eventRecorder = ProcessTransportEventRecorder()
+
+        let transport = CodexAppServerProcessTransport(executableURL: executableURL)
+        try transport.start(
+            onMessage: { messageData in
+                eventRecorder.recordMessage(messageData)
+                messageExpectation.fulfill()
+            },
+            onTermination: { _ in
+                eventRecorder.recordTermination()
+                terminationExpectation.fulfill()
+            }
+        )
+
+        wait(for: [messageExpectation, terminationExpectation], timeout: 5)
+        let recordedEvents = eventRecorder.snapshot()
+
+        XCTAssertEqual(recordedEvents.message, terminalMessage)
+        XCTAssertEqual(recordedEvents.events, ["message", "termination"])
+        transport.stop()
+    }
+
+    func testProcessTransportPublishesOnlySanitizedRecentStandardError() throws {
+        let temporaryDirectoryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: temporaryDirectoryURL,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: temporaryDirectoryURL) }
+
+        let executableURL = temporaryDirectoryURL.appendingPathComponent("stderr-tail.sh")
+        let historicalOutput = "SECRET_OLD_AUTH\n" + String(repeating: "x", count: 5_000)
+        let recentOutput = "\u{001B}[31mrecent crash detail\u{001B}[0m"
+        let script = "#!/bin/sh\nprintf '%s' '\(historicalOutput)' >&2\nprintf '%s' '\(recentOutput)' >&2\nexit 9\n"
+        try Data(script.utf8).write(to: executableURL)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: executableURL.path
+        )
+
+        let terminationExpectation = expectation(description: "sanitized process termination")
+        let eventRecorder = ProcessTransportEventRecorder()
+        let transport = CodexAppServerProcessTransport(executableURL: executableURL)
+        try transport.start(
+            onMessage: { _ in },
+            onTermination: { error in
+                eventRecorder.recordTermination(error)
+                terminationExpectation.fulfill()
+            }
+        )
+
+        wait(for: [terminationExpectation], timeout: 5)
+        let recordedError = try XCTUnwrap(eventRecorder.snapshot().terminationError)
+        guard case .processTerminated(let exitCode, let standardError) = recordedError else {
+            return XCTFail("Expected a process termination error")
+        }
+
+        XCTAssertEqual(exitCode, 9)
+        XCTAssertFalse(standardError.contains("SECRET_OLD_AUTH"))
+        XCTAssertFalse(standardError.contains("\u{001B}"))
+        XCTAssertTrue(standardError.hasSuffix("recent crash detail"))
+        XCTAssertLessThanOrEqual(standardError.utf8.count, CodexProcessStandardError.maximumCapturedByteCount)
+        transport.stop()
+    }
+
     func testExecutableOverrideIsTheFirstCandidate() {
         let candidateURLs = CodexExecutableLocator.candidateURLs(
             environment: [
@@ -126,6 +278,152 @@ final class CodexAppServerCoreTests: XCTestCase {
         )
         let connectionState = await client.connectionState
         XCTAssertEqual(connectionState, .connected)
+
+        await client.stop()
+    }
+
+    func testChatGPTLoginUsesCodexManagedSubscriptionFlow() async throws {
+        let transport = MockCodexAppServerTransport(isSignedOut: true)
+        let client = makeClient(transport: transport)
+        let session = try await client.connect()
+
+        XCTAssertFalse(session.account.isAuthenticated)
+        let connectionState = await client.connectionState
+        XCTAssertEqual(connectionState, .connected)
+
+        let loginResponse = try await client.startChatGPTLogin()
+
+        XCTAssertEqual(loginResponse.type, "chatgpt")
+        XCTAssertEqual(loginResponse.loginId, "login_clicky")
+        XCTAssertEqual(loginResponse.authUrl, "https://auth.openai.com/codex")
+        XCTAssertEqual(transport.sentMethods.last, "account/login/start")
+        XCTAssertEqual(
+            transport.sentRequestParameters["account/login/start"],
+            .object([
+                "type": .string("chatgpt"),
+                "appBrand": .string("codex"),
+                "codexStreamlinedLogin": .boolean(true),
+                "useHostedLoginSuccessPage": .boolean(true)
+            ])
+        )
+
+        await client.stop()
+    }
+
+    func testChatGPTLoginCompletionNotificationsPreserveIdentityAndOutcome() async throws {
+        let transport = MockCodexAppServerTransport(isSignedOut: true)
+        let client = makeClient(transport: transport)
+        _ = try await client.connect()
+        var completionIterator = client.accountLoginCompletions.makeAsyncIterator()
+
+        transport.emitNotification(
+            method: "account/login/completed",
+            params: .object([
+                "loginId": .string("login_clicky"),
+                "success": .boolean(true),
+                "error": .null
+            ])
+        )
+        let successfulCompletion = await completionIterator.next()
+
+        XCTAssertEqual(
+            successfulCompletion,
+            CodexAppServerAccountLoginCompletedNotification(
+                loginId: "login_clicky",
+                success: true,
+                error: nil
+            )
+        )
+
+        transport.emitNotification(
+            method: "account/login/completed",
+            params: .object([
+                "loginId": .string("login_replacement"),
+                "success": .boolean(false),
+                "error": .string("Browser login expired")
+            ])
+        )
+        let failedCompletion = await completionIterator.next()
+
+        XCTAssertEqual(
+            failedCompletion,
+            CodexAppServerAccountLoginCompletedNotification(
+                loginId: "login_replacement",
+                success: false,
+                error: "Browser login expired"
+            )
+        )
+
+        transport.emitNotification(
+            method: "account/login/completed",
+            params: .object([
+                "loginId": .null,
+                "success": .boolean(true),
+                "error": .null
+            ])
+        )
+        let completionWithoutLoginID = await completionIterator.next()
+
+        XCTAssertEqual(
+            completionWithoutLoginID,
+            CodexAppServerAccountLoginCompletedNotification(
+                loginId: nil,
+                success: true,
+                error: nil
+            )
+        )
+        XCTAssertTrue(
+            CodexAppServerLoginCompletionMatcher.matches(
+                try XCTUnwrap(completionWithoutLoginID),
+                activeLoginID: "login_clicky",
+                allowsMissingLoginID: true
+            )
+        )
+        XCTAssertFalse(
+            CodexAppServerLoginCompletionMatcher.matches(
+                try XCTUnwrap(completionWithoutLoginID),
+                activeLoginID: "login_clicky",
+                allowsMissingLoginID: false
+            )
+        )
+        XCTAssertFalse(
+            CodexAppServerLoginCompletionMatcher.matches(
+                try XCTUnwrap(failedCompletion),
+                activeLoginID: "login_clicky",
+                allowsMissingLoginID: true
+            )
+        )
+        XCTAssertTrue(
+            CodexAppServerLoginCompletionMatcher.matches(
+                CodexAppServerAccountLoginCompletedNotification(
+                    loginId: "login_clicky",
+                    success: true,
+                    error: nil
+                ),
+                activeLoginID: "login_clicky",
+                allowsMissingLoginID: false
+            )
+        )
+
+        await client.stop()
+    }
+
+    func testChatGPTLoginCancellationUsesTheStartedLoginIdentity() async throws {
+        let transport = MockCodexAppServerTransport(isSignedOut: true)
+        let client = makeClient(transport: transport)
+        _ = try await client.connect()
+        let loginResponse = try await client.startChatGPTLogin()
+
+        let cancellationResponse = try await client.cancelChatGPTLogin(
+            loginID: loginResponse.loginId
+        )
+
+        XCTAssertEqual(cancellationResponse.status, .canceled)
+        XCTAssertEqual(transport.sentMethods.last, "account/login/cancel")
+        XCTAssertEqual(
+            transport.sentRequestParameters["account/login/cancel"],
+            .object(["loginId": .string("login_clicky")])
+        )
 
         await client.stop()
     }
@@ -313,6 +611,142 @@ final class CodexAppServerCoreTests: XCTestCase {
         await client.stop()
     }
 
+    func testIncomingMessagesPreserveTransportOrder() async throws {
+        let transport = MockCodexAppServerTransport()
+        let client = makeClient(transport: transport)
+        _ = try await client.connect()
+
+        var notificationIterator = client.notifications.makeAsyncIterator()
+        for messageIndex in 0..<750 {
+            transport.emitNotification(
+                method: "item/agentMessage/delta",
+                params: .object(["sequence": .integer(Int64(messageIndex))])
+            )
+        }
+
+        var receivedSequence: [Int64] = []
+        for _ in 0..<750 {
+            let notification = await notificationIterator.next()
+            guard case .integer(let messageIndex)? = notification?
+                .params?.objectValue?["sequence"] else {
+                XCTFail("Expected an integer sequence")
+                continue
+            }
+            receivedSequence.append(messageIndex)
+        }
+
+        XCTAssertEqual(receivedSequence, (0..<750).map(Int64.init))
+        await client.stop()
+    }
+
+    func testUserInputAutoResolutionReturnsEmptyAnswersAfterWindow() async throws {
+        let transport = MockCodexAppServerTransport()
+        let client = makeClient(transport: transport)
+        _ = try await client.connect()
+        let store = CodexAgentTaskStore()
+        await store.startMonitoring(client: client)
+
+        transport.emitServerRequest(
+            id: .integer(51),
+            method: "item/tool/requestUserInput",
+            params: .object([
+                "threadId": .string("thread_auto_input"),
+                "turnId": .string("turn_auto_input"),
+                "itemId": .string("input_auto"),
+                "questions": .array([
+                    .object([
+                        "id": .string("scope"),
+                        "header": .string("Scope"),
+                        "question": .string("Continue with the safe default?"),
+                        "isOther": .boolean(false),
+                        "isSecret": .boolean(false),
+                        "options": .array([
+                            .object([
+                                "label": .string("Continue"),
+                                "description": .string("Use the safe default.")
+                            ])
+                        ])
+                    ])
+                ]),
+                "autoResolutionMs": .integer(10)
+            ])
+        )
+
+        for _ in 0..<100 where !transport.sentResponseIDs.contains(.integer(51)) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        XCTAssertTrue(transport.sentResponseIDs.contains(.integer(51)))
+        XCTAssertEqual(
+            transport.sentResponseResults.last?.objectValue?["answers"],
+            .object([:])
+        )
+        let snapshots = await store.currentSnapshots()
+        XCTAssertTrue(snapshots.first?.pendingUserInputs.isEmpty == true)
+
+        await store.stopMonitoring()
+        await client.stop()
+    }
+
+    func testUnexpectedTransportTerminationPublishesAConnectionFailure() async throws {
+        let transport = MockCodexAppServerTransport()
+        let client = makeClient(transport: transport)
+        _ = try await client.connect()
+        var failureIterator = client.failures.makeAsyncIterator()
+
+        let expectedFailure = CodexAppServerError.processTerminated(
+            exitCode: 9,
+            standardError: "terminated for test"
+        )
+        transport.emitTermination(expectedFailure)
+
+        let failure = await failureIterator.next()
+        XCTAssertEqual(failure, expectedFailure)
+        let connectionState = await client.connectionState
+        XCTAssertEqual(connectionState, .disconnected)
+    }
+
+    func testCoordinatorRejectsFollowUpFromAnotherWorkspace() async throws {
+        let transport = MockCodexAppServerTransport()
+        let coordinator = CodexAgentCoordinator(
+            client: makeClient(transport: transport)
+        )
+        let task = CodexAgentTaskSnapshot(
+            threadID: "thread_workspace",
+            turnID: "turn_workspace",
+            workspacePath: "/tmp",
+            title: "Workspace invariant",
+            status: .running,
+            latestAgentMessage: "",
+            currentActivity: nil,
+            activities: [],
+            pendingApprovals: [],
+            pendingUserInputs: [],
+            errorMessage: nil,
+            lastEventSequence: 1
+        )
+        let differentWorkspace = try CodexAgentWorkspace(
+            directoryURL: URL(fileURLWithPath: "/")
+        )
+
+        do {
+            try await coordinator.followUp(
+                prompt: "Continue",
+                on: task,
+                in: differentWorkspace
+            )
+            XCTFail("Expected the coordinator to reject a cross-workspace follow-up")
+        } catch let error as CodexAgentCoordinatorError {
+            XCTAssertEqual(
+                error,
+                .workspaceMismatch(expectedPath: "/tmp", providedPath: "/")
+            )
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+        XCTAssertTrue(transport.sentMethods.isEmpty)
+    }
+
     private func makeClient(
         transport: MockCodexAppServerTransport,
         requestTimeoutNanoseconds: UInt64 = 15_000_000_000
@@ -384,6 +818,42 @@ final class CodexAppServerCoreTests: XCTestCase {
 
 private struct NotificationCollectionTimeoutError: Error {}
 
+private final class ProcessTransportEventRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var message: String?
+    private var events: [String] = []
+    private var terminationError: CodexAppServerError?
+
+    func recordMessage(_ messageData: Data) {
+        lock.lock()
+        message = String(data: messageData, encoding: .utf8)
+        events.append("message")
+        lock.unlock()
+    }
+
+    func recordTermination(_ error: CodexAppServerError? = nil) {
+        lock.lock()
+        terminationError = error
+        events.append("termination")
+        lock.unlock()
+    }
+
+    func snapshot() -> (
+        message: String?,
+        events: [String],
+        terminationError: CodexAppServerError?
+    ) {
+        lock.lock()
+        let snapshot = (
+            message: message,
+            events: events,
+            terminationError: terminationError
+        )
+        lock.unlock()
+        return snapshot
+    }
+}
+
 final class CodexAppServerLiveTests: XCTestCase {
     func testAuthenticatedChatGPTCodexHandshake() async throws {
         guard ProcessInfo.processInfo.environment["CLICKY_RUN_CODEX_INTEGRATION_TESTS"] == "1" else {
@@ -416,6 +886,7 @@ private final class MockCodexAppServerTransport: CodexAppServerTransport, @unche
     private let accountReadError: Bool
     private let ignoreAllRequests: Bool
     private let holdFirstInitializeResponse: Bool
+    private let isSignedOut: Bool
     private var messageHandler: (@Sendable (Data) -> Void)?
     private var terminationHandler: (@Sendable (CodexAppServerError) -> Void)?
     private var previousTerminationHandler: (@Sendable (CodexAppServerError) -> Void)?
@@ -423,7 +894,9 @@ private final class MockCodexAppServerTransport: CodexAppServerTransport, @unche
     private var storedInitializeRequestCount = 0
 
     private(set) var sentMethods: [String] = []
+    private(set) var sentRequestParameters: [String: CodexJSONValue] = [:]
     private(set) var sentResponseIDs: [CodexAppServerRequestID] = []
+    private(set) var sentResponseResults: [CodexJSONValue] = []
     private(set) var didStop = false
 
     var initializeRequestCount: Int {
@@ -436,11 +909,13 @@ private final class MockCodexAppServerTransport: CodexAppServerTransport, @unche
     init(
         accountReadError: Bool = false,
         ignoreAllRequests: Bool = false,
-        holdFirstInitializeResponse: Bool = false
+        holdFirstInitializeResponse: Bool = false,
+        isSignedOut: Bool = false
     ) {
         self.accountReadError = accountReadError
         self.ignoreAllRequests = ignoreAllRequests
         self.holdFirstInitializeResponse = holdFirstInitializeResponse
+        self.isSignedOut = isSignedOut
     }
 
     func start(
@@ -469,8 +944,14 @@ private final class MockCodexAppServerTransport: CodexAppServerTransport, @unche
                 shouldHoldInitializeResponse = holdFirstInitializeResponse
                     && storedInitializeRequestCount == 1
             }
+            if let parameters = incomingMessage.params {
+                sentRequestParameters[method] = parameters
+            }
         } else if let responseID = incomingMessage.id {
             sentResponseIDs.append(responseID)
+            if let responseResult = incomingMessage.result {
+                sentResponseResults.append(responseResult)
+            }
         }
         let currentMessageHandler = messageHandler
         stateLock.unlock()
@@ -510,13 +991,31 @@ private final class MockCodexAppServerTransport: CodexAppServerTransport, @unche
             let response = CodexAppServerOutgoingResponse(
                 id: requestID,
                 result: CodexAppServerAccountReadResponse(
-                    account: CodexAppServerAccount(
-                        type: "chatgpt",
-                        email: "clicky@example.com",
-                        planType: "plus"
-                    ),
+                    account: isSignedOut
+                        ? nil
+                        : CodexAppServerAccount(
+                            type: "chatgpt",
+                            email: "clicky@example.com",
+                            planType: "plus"
+                        ),
                     requiresOpenaiAuth: true
                 )
+            )
+            currentMessageHandler?(try JSONEncoder().encode(response))
+        case "account/login/start":
+            let response = CodexAppServerOutgoingResponse(
+                id: requestID,
+                result: CodexAppServerChatGPTLoginResponse(
+                    type: "chatgpt",
+                    loginId: "login_clicky",
+                    authUrl: "https://auth.openai.com/codex"
+                )
+            )
+            currentMessageHandler?(try JSONEncoder().encode(response))
+        case "account/login/cancel":
+            let response = CodexAppServerOutgoingResponse(
+                id: requestID,
+                result: CodexAppServerCancelLoginResponse(status: .canceled)
             )
             currentMessageHandler?(try JSONEncoder().encode(response))
         default:
@@ -547,6 +1046,13 @@ private final class MockCodexAppServerTransport: CodexAppServerTransport, @unche
         let previousTerminationHandler = previousTerminationHandler
         stateLock.unlock()
         previousTerminationHandler?(error)
+    }
+
+    func emitTermination(_ error: CodexAppServerError) {
+        stateLock.lock()
+        let currentTerminationHandler = terminationHandler
+        stateLock.unlock()
+        currentTerminationHandler?(error)
     }
 
     func emitNotification(method: String, params: CodexJSONValue) {

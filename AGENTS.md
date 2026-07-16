@@ -21,8 +21,8 @@ All provider API keys live on a Cloudflare Worker proxy. The app authenticates t
 - **Screen-Aware Composition**: OpenAI Responses (`gpt-5.6-luna` by default) receives one bounded focused-field context plus only the display containing that field. The Worker returns insertion text; the app atomically inserts it only if the original value and selection are unchanged.
 - **Voice Input**: Push-to-talk via `AVAudioEngine` + pluggable transcription-provider layer. A listen-only CGEvent tap distinguishes `control + fn` fast dictation from `ctrl + option` companion requests.
 - **Element Pointing**: Claude embeds `[POINT:x,y:label:screenN]` tags in responses. The overlay parses these, maps coordinates to the correct monitor, and animates the blue cursor along a bezier arc to the target.
-- **Codex Agents**: The UI-independent foundation launches a local Codex app-server over JSONL stdio, performs the required initialization handshake, reads ChatGPT subscription authentication, correlates requests, and streams notifications plus server-initiated approval requests. Agent threads and UI are not wired yet.
-- **Concurrency**: UI state uses `@MainActor`; the Codex app-server client is an actor and process I/O is lock-protected before crossing into async streams.
+- **Codex Agents**: Clicky launches a local Codex app-server over JSONL stdio, uses the user's existing ChatGPT subscription authentication, and exposes concurrent workspace-scoped threads through a persistent notch HUD. The actor-backed coordinator/store owns protocol state; a `@MainActor` presentation model projects line-based overview, task detail, approval, and persistent delivery-token surfaces.
+- **Concurrency**: UI state uses `@MainActor`; the Codex app-server client, coordinator, and task store are actors, and process I/O is lock-protected before crossing into async streams. Full-state HUD snapshots use newest-one buffering and main-actor coalescing so streamed deltas cannot starve window interaction.
 - **Analytics**: PostHog via `ClickyAnalytics.swift`
 
 ### API Proxy (Cloudflare Worker)
@@ -64,17 +64,21 @@ Worker vars: `ELEVENLABS_VOICE_ID`, `VERTEX_PROJECT_ID`, `VERTEX_REGION`, `OPENA
 
 **Safe Agent Workspace**: Every thread start/resume and turn start requires an existing Agent Folder. Clicky reasserts `on-request`, user-reviewed approvals, and `workspace-write`; turns also send an explicit writable-root list containing only the selected folder and disable network access. Thread history is listed by exact `cwd`. The agent API supports start, resume, list, read, turn start, steer, and interrupt without exposing unrestricted defaults to callers.
 
-**Agent Task State**: `CodexAgentTaskStore` reduces the notification and server-request streams into concurrent snapshots keyed by thread. It assembles agent message deltas, tracks current and recent command/file/tool activities, preserves pending approvals by request ID, handles waiting-for-input and terminal states, and publishes newest-first HUD-ready snapshots. Per-turn presentation state resets when a durable thread starts another turn. Approval presence is authoritative across the two independently consumed streams, so out-of-order delivery cannot hide or resurrect an approval.
+**Agent Task State**: `CodexAgentTaskStore` reduces ordered notification and server-request streams into concurrent snapshots keyed by thread. It assembles message deltas per item, tracks command/file/tool activities, preserves approvals and structured user-input requests by JSON-RPC request ID, handles idle/waiting/terminal states, and publishes newest-first HUD-ready snapshots. Per-turn state resets when a durable thread starts another turn. Approval and user-input presence remain authoritative across independently consumed streams, so out-of-order delivery cannot hide or resurrect an outstanding request.
+
+**Agent HUD and Delivery Tokens**: One `AgentPresentationModel` observes coalesced full-state snapshots and filters them to the selected Agent Folder. `AgentHUDWindowManager` owns non-activating per-screen notch and top-right delivery-token panels. The notch has flat screen-aligned top corners, rounded lower corners, dense line rows, and task detail. Running and terminal tokens remain on-screen; completed/interrupted/failed tokens draw attention and disappear only after explicit presentation-only dismissal, while their history remains available.
+
+**Codex Context Ownership**: Clicky sends only the new turn input. Codex app-server owns persisted conversation history, prompt-cache keys, compaction, and context reconstruction on `thread/resume`. `turn/completed` is authoritative for terminal turn state; a preceding thread `idle` notification never fabricates completion. Context-compaction activity is typed, preserves the prior result, and rejects steering until the compaction turn resolves.
 
 ## Key Files
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `leanring_buddyApp.swift` | ~89 | Menu bar app entry point. Uses `@NSApplicationDelegateAdaptor` with `CompanionAppDelegate` which creates `MenuBarPanelManager` and starts `CompanionManager`. No main window — the app lives entirely in the status bar. |
+| `leanring_buddyApp.swift` | ~98 | Menu bar app entry point. Uses `@NSApplicationDelegateAdaptor` with `CompanionAppDelegate`, which creates the companion panel plus agent coordinator/presentation/HUD managers and starts `CompanionManager`. No main window — the app lives entirely in the status bar. |
 | `CompanionManager.swift` | ~1255 | Central state machine. Owns shortcut routing, literal and screen-aware dictation, focused-field insertion, screen capture, Claude API, ElevenLabs TTS, and overlay management. Tracks voice state, conversation history, model selection, and cursor visibility. |
-| `MenuBarPanelManager.swift` | ~243 | NSStatusItem + custom NSPanel lifecycle. Creates the menu bar icon, manages the floating companion panel (show/hide/position), installs click-outside-to-dismiss monitor. |
+| `MenuBarPanelManager.swift` | ~255 | NSStatusItem + custom NSPanel lifecycle. Creates the menu bar icon, manages the floating companion panel, opens the agent HUD, and installs click-outside-to-dismiss behavior. |
 | `CompanionPanelView.swift` | ~761 | SwiftUI panel content for the menu bar dropdown. Shows companion status, push-to-talk instructions, model picker (Sonnet/Opus), permissions UI, DM feedback button, and quit button. Dark aesthetic using `DS` design system. |
-| `OverlayWindow.swift` | ~881 | Full-screen transparent overlay hosting the blue cursor, response text, waveform, and spinner. Handles cursor animation, element pointing with bezier arcs, multi-monitor coordinate mapping, and fade-out transitions. |
+| `OverlayWindow.swift` | ~863 | Full-screen transparent overlay hosting the blue cursor, response text, waveform, and spinner. Handles cursor following, element pointing with bezier arcs, multi-monitor coordinate mapping, and fade-out transitions. |
 | `CompanionResponseOverlay.swift` | ~217 | SwiftUI view for the response text bubble and waveform displayed next to the cursor in the overlay. |
 | `CompanionScreenCaptureUtility.swift` | ~217 | ScreenCaptureKit capture. Companion chat can capture all displays; screen-aware dictation resolves and captures only the focused field's display. |
 | `BuddyDictationManager.swift` | ~950 | Push-to-talk voice pipeline. Handles microphone capture via `AVAudioEngine`, provider-aware permission checks, keyboard/button dictation sessions, transcript finalization, dual-shortcut parsing, contextual keyterms, and live audio-level reporting for waveform feedback. |
@@ -105,12 +109,21 @@ Worker vars: `ELEVENLABS_VOICE_ID`, `VERTEX_PROJECT_ID`, `VERTEX_REGION`, `OPENA
 | `AgentCore/CodexAppServerClient.swift` | ~320 | Actor that performs initialization and account discovery, correlates requests with timeouts, streams notifications and approval requests, and sends typed responses. |
 | `AgentCore/CodexAgentModels.swift` | ~254 | Validated Agent Folder, safe approval/sandbox settings, durable thread and turn models, request contracts, and typed lifecycle notifications. |
 | `AgentCore/CodexAgentClient.swift` | ~153 | Safe app-server thread and turn operations: start, resume, list, read, start turn, steer, and interrupt. |
-| `AgentCore/CodexAgentTaskModels.swift` | ~120 | HUD-independent task, activity, approval, and event models for concurrent agent progress. |
-| `AgentCore/CodexAgentTaskStore.swift` | ~582 | Actor reducer and stream monitor that converts Codex notifications and approval requests into bounded, concurrent task snapshots. |
+| `AgentCore/CodexAgentTaskModels.swift` | ~183 | HUD-independent task, typed compaction/activity, approval, structured user-input, idle, and event models for concurrent agent progress. |
+| `AgentCore/CodexAgentTaskStore.swift` | ~819 | Actor reducer and stream monitor that converts ordered Codex notifications and request-ID-bound approvals/input into bounded snapshots, keeps `turn/completed` authoritative, and protects live turns from stale hydration. |
+| `AgentCore/CodexAgentCoordinator.swift` | ~274 | Workspace-scoped orchestration for account refresh/login, history, thread/turn start, same-thread follow-up, steer, interrupt, typed approvals, and structured user-input responses. |
+| `AgentPresentationModel.swift` | ~889 | Main-actor projection from snapshots, identity-bound authentication lifecycle, and process failures into workspace-filtered routes, forms, approvals/input, explicit token dismissal, and low-frequency layout revisions. |
+| `AgentHUDWindowManager.swift` | ~228 | Owns non-activating notch and top-right token panels, active-screen placement, key-window release, click-outside behavior, and frame changes only when layout actually changes. |
+| `AgentNotchView.swift` | ~632 | Flat-top, rounded-bottom notch shell with Home/Agents navigation, signed-out recovery, dense active/recent task rows, new-agent form, and preview fixtures. |
+| `AgentTaskDetailView.swift` | ~599 | Running, scoped approval, structured input, terminal, activity, artifact, stop, follow-up, and explicit delivery-token dismissal states. |
+| `AgentTokenRailView.swift` | ~202 | Persistent line-based top-right task delivery tokens with live status, terminal attention animation, selection, and dismissal. |
+| `AgentHUDComponents.swift` | ~342 | Shared HUD status chips, task rows, activity rows, approval controls, hover treatment, and visual styles built on `DS`. |
+| `ClickyTriangle.swift` | ~22 | Reusable gradient triangle mark used by the agent HUD surfaces. |
+| `ClickyNotifications.swift` | ~13 | Local notification names for opening the agent HUD and choosing an Agent Folder. |
 | `Package.swift` | ~42 | UI-independent Swift package harness for compiling and testing agent and dictation protocol cores without invoking Xcode or touching TCC permissions. |
-| `AgentCoreTests/CodexAppServerCoreTests.swift` | ~320 | Deterministic transport/protocol tests plus an opt-in live handshake against an installed, authenticated Codex app-server. |
-| `AgentCoreTests/CodexAgentThreadTests.swift` | ~510 | Wire-level safety tests for workspace scoping and durable thread/turn operations plus an opt-in ephemeral live thread test. |
-| `AgentCoreTests/CodexAgentTaskStoreTests.swift` | ~525 | Reducer tests for concurrency, deltas, activities, approvals, terminal states, multi-turn reset, ordering, and memory bounds. |
+| `AgentCoreTests/CodexAppServerCoreTests.swift` | ~377 | Deterministic framing, transport-order, process-failure, protocol, and request-correlation tests plus an opt-in live authenticated handshake. |
+| `AgentCoreTests/CodexAgentThreadTests.swift` | ~560 | Wire-level safety and response-schema tests for workspace scoping, durable threads/turns, approvals, structured input, and an opt-in live thread. |
+| `AgentCoreTests/CodexAgentTaskStoreTests.swift` | ~1003 | Reducer tests for concurrency, per-item deltas, approvals/input, idle ordering, compaction, hydration races, failed starts, multi-turn reset, and memory bounds. |
 | `DictationCoreTests/OpenAIRealtimeTranscriptionProtocolTests.swift` | ~69 | Deterministic tests for Realtime session configuration, audio encoding, event parsing, and transcript reconciliation. |
 | `DictationCoreTests/FocusedTextInsertionPlanTests.swift` | ~58 | Deterministic caret insertion, word-boundary spacing, selection replacement, Unicode, and stale-range safety tests. |
 | `DictationCoreTests/ShortcutModifierStateTests.swift` | ~36 | Exact chord, extra-modifier rejection, irrelevant modifier, and neutral-state tests. |

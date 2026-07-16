@@ -9,6 +9,7 @@ import Foundation
 
 enum CodexAgentTaskStatus: String, Codable, Equatable, Sendable {
     case queued
+    case idle
     case running
     case waitingForApproval
     case waitingForInput
@@ -18,7 +19,7 @@ enum CodexAgentTaskStatus: String, Codable, Equatable, Sendable {
 
     var isTerminal: Bool {
         switch self {
-        case .completed, .interrupted, .failed:
+        case .idle, .completed, .interrupted, .failed:
             return true
         case .queued, .running, .waitingForApproval, .waitingForInput:
             return false
@@ -34,6 +35,7 @@ enum CodexAgentActivityKind: String, Codable, Equatable, Sendable {
     case collaboration
     case plan
     case reasoning
+    case contextCompaction
     case other
 }
 
@@ -60,6 +62,72 @@ struct CodexAgentApproval: Codable, Equatable, Sendable {
     let summary: String
     let reason: String?
     let workingDirectory: String?
+    let requestedPermissions: CodexJSONValue?
+}
+
+enum CodexAgentApprovalDecision: String, Codable, Equatable, Sendable {
+    case accept
+    case acceptForSession
+    case decline
+    case cancel
+}
+
+struct CodexAgentApprovalDecisionResponse: Codable, Equatable, Sendable {
+    let decision: CodexAgentApprovalDecision
+}
+
+enum CodexAgentPermissionGrantScope: String, Codable, Equatable, Sendable {
+    case turn
+    case session
+}
+
+struct CodexAgentPermissionsApprovalResponse: Codable, Equatable, Sendable {
+    let permissions: CodexJSONValue
+    let scope: CodexAgentPermissionGrantScope
+}
+
+struct CodexAgentUserInputOption: Codable, Equatable, Sendable {
+    let label: String
+    let description: String
+}
+
+struct CodexAgentUserInputQuestion: Codable, Equatable, Sendable, Identifiable {
+    let id: String
+    let header: String
+    let question: String
+    let isOther: Bool
+    let isSecret: Bool
+    let options: [CodexAgentUserInputOption]?
+}
+
+struct CodexAgentUserInputParameters: Codable, Equatable, Sendable {
+    let threadId: String
+    let turnId: String
+    let itemId: String
+    let questions: [CodexAgentUserInputQuestion]
+    let autoResolutionMs: Int?
+}
+
+struct CodexAgentUserInputRequest: Codable, Equatable, Sendable {
+    let requestID: CodexAppServerRequestID
+    let threadID: String
+    let turnID: String
+    let itemID: String
+    let questions: [CodexAgentUserInputQuestion]
+    let autoResolutionMs: Int?
+}
+
+struct CodexAgentUserInputAnswer: Codable, Equatable, Sendable {
+    let answers: [String]
+}
+
+struct CodexAgentUserInputResponse: Codable, Equatable, Sendable {
+    let answers: [String: CodexAgentUserInputAnswer]
+}
+
+struct CodexAgentServerRequestResolvedNotification: Codable, Equatable, Sendable {
+    let requestId: CodexAppServerRequestID
+    let threadId: String
 }
 
 struct CodexAgentTaskSnapshot: Codable, Equatable, Sendable {
@@ -72,6 +140,7 @@ struct CodexAgentTaskSnapshot: Codable, Equatable, Sendable {
     let currentActivity: CodexAgentActivity?
     let activities: [CodexAgentActivity]
     let pendingApprovals: [CodexAgentApproval]
+    let pendingUserInputs: [CodexAgentUserInputRequest]
     let errorMessage: String?
     let lastEventSequence: Int64
 }
@@ -95,11 +164,6 @@ struct CodexAgentItemCompletedNotification: Codable, Equatable, Sendable {
     let turnId: String
     let item: CodexJSONValue
     let completedAtMs: Int64
-}
-
-struct CodexAgentServerRequestResolvedNotification: Codable, Equatable, Sendable {
-    let requestId: CodexAppServerRequestID
-    let threadId: String
 }
 
 struct CodexAgentThreadStatusChangedNotification: Codable, Equatable, Sendable {

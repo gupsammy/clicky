@@ -52,24 +52,6 @@ class OverlayWindow: NSWindow {
     }
 }
 
-// Cursor-like triangle shape (equilateral)
-struct Triangle: Shape {
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        let size = min(rect.width, rect.height)
-        let height = size * sqrt(3.0) / 2.0
-
-        // Top vertex
-        path.move(to: CGPoint(x: rect.midX, y: rect.midY - height / 1.5))
-        // Bottom left vertex
-        path.addLine(to: CGPoint(x: rect.midX - size / 2, y: rect.midY + height / 3))
-        // Bottom right vertex
-        path.addLine(to: CGPoint(x: rect.midX + size / 2, y: rect.midY + height / 3))
-        path.closeSubpath()
-        return path
-    }
-}
-
 // PreferenceKey for tracking bubble size
 struct SizePreferenceKey: PreferenceKey {
     static var defaultValue: CGSize = .zero
@@ -365,7 +347,7 @@ struct BlueCursorView: View {
         }
         .onDisappear {
             timer?.invalidate()
-            navigationAnimationTimer?.invalidate()
+            resetNavigationForTeardown()
             companionManager.tearDownOnboardingVideo()
         }
         .onChange(of: companionManager.detectedElementScreenLocation) { newLocation in
@@ -411,7 +393,10 @@ struct BlueCursorView: View {
     private func startTrackingCursor() {
         timer = Timer.scheduledTimer(withTimeInterval: 0.016, repeats: true) { _ in
             let mouseLocation = NSEvent.mouseLocation
-            self.isCursorOnThisScreen = self.screenFrame.contains(mouseLocation)
+            let cursorIsOnThisScreen = self.screenFrame.contains(mouseLocation)
+            if self.isCursorOnThisScreen != cursorIsOnThisScreen {
+                self.isCursorOnThisScreen = cursorIsOnThisScreen
+            }
 
             // During forward flight or pointing, the buddy is NOT interrupted by
             // mouse movement — it completes its full animation and return flight.
@@ -434,11 +419,19 @@ struct BlueCursorView: View {
                 return
             }
 
+            // Every display owns an overlay view, but only the display under
+            // the physical pointer should publish follow-position changes.
+            // Avoiding off-screen and unchanged state writes keeps an idle
+            // multi-display setup from invalidating two SwiftUI trees at 60 Hz.
+            guard cursorIsOnThisScreen else { return }
+
             // Normal cursor following
             let swiftUIPosition = self.convertScreenPointToSwiftUICoordinates(mouseLocation)
             let buddyX = swiftUIPosition.x + 35
             let buddyY = swiftUIPosition.y + 25
-            self.cursorPosition = CGPoint(x: buddyX, y: buddyY)
+            let nextCursorPosition = CGPoint(x: buddyX, y: buddyY)
+            guard self.cursorPosition != nextCursorPosition else { return }
+            self.cursorPosition = nextCursorPosition
         }
     }
 
@@ -672,6 +665,21 @@ struct BlueCursorView: View {
         companionManager.clearDetectedElementLocation()
     }
 
+    /// Stops every navigation-owned timer and removes the shared target before
+    /// this screen's view is discarded. Delayed bubble callbacks also become
+    /// harmless because they require the pointing mode to still be active.
+    private func resetNavigationForTeardown() {
+        navigationAnimationTimer?.invalidate()
+        navigationAnimationTimer = nil
+        buddyNavigationMode = .followingCursor
+        isReturningToCursor = false
+        navigationBubbleText = ""
+        navigationBubbleOpacity = 0.0
+        navigationBubbleScale = 1.0
+        buddyFlightScale = 1.0
+        companionManager.clearDetectedElementLocation()
+    }
+
     // MARK: - Welcome Animation
 
     private func startWelcomeAnimation() {
@@ -778,18 +786,21 @@ private struct BlueCursorSpinnerView: View {
 @MainActor
 class OverlayWindowManager {
     private var overlayWindows: [OverlayWindow] = []
+    private var presentationGeneration = 0
+    private weak var activeCompanionManager: CompanionManager?
     var hasShownOverlayBefore = false
 
     func showOverlay(onScreens screens: [NSScreen], companionManager: CompanionManager) {
         // Hide any existing overlays
         hideOverlay()
+        activeCompanionManager = companionManager
 
         // Track if this is the first time showing overlay (welcome message)
         let isFirstAppearance = !hasShownOverlayBefore
         hasShownOverlayBefore = true
 
         // Create one overlay window per screen
-        for screen in screens {
+        for screen in uniqueScreensByDisplayIdentifier(screens) {
             let window = OverlayWindow(screen: screen)
 
             let contentView = BlueCursorView(
@@ -808,6 +819,8 @@ class OverlayWindowManager {
     }
 
     func hideOverlay() {
+        presentationGeneration &+= 1
+        activeCompanionManager?.clearDetectedElementLocation()
         for window in overlayWindows {
             window.orderOut(nil)
             window.contentView = nil
@@ -817,8 +830,9 @@ class OverlayWindowManager {
 
     /// Fades out overlay windows over `duration` seconds, then removes them.
     func fadeOutAndHideOverlay(duration: TimeInterval = 0.4) {
+        presentationGeneration &+= 1
+        let fadeGeneration = presentationGeneration
         let windowsToFade = overlayWindows
-        overlayWindows.removeAll()
 
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = duration
@@ -826,16 +840,42 @@ class OverlayWindowManager {
             for window in windowsToFade {
                 window.animator().alphaValue = 0
             }
-        }, completionHandler: {
-            for window in windowsToFade {
-                window.orderOut(nil)
-                window.contentView = nil
+        }, completionHandler: { [weak self] in
+            Task { @MainActor in
+                for window in windowsToFade {
+                    window.orderOut(nil)
+                    window.contentView = nil
+                }
+
+                // A new show may have synchronously hidden these fading
+                // windows and installed replacements. Only the fade that
+                // still owns the current presentation may clear the array.
+                guard let self, self.presentationGeneration == fadeGeneration else {
+                    return
+                }
+                self.activeCompanionManager?.clearDetectedElementLocation()
+                self.overlayWindows.removeAll()
             }
         })
     }
 
     func isShowingOverlay() -> Bool {
         return !overlayWindows.isEmpty
+    }
+
+    /// Screen-change notifications can briefly contain duplicate NSScreen
+    /// entries. Build at most one overlay for each stable CoreGraphics display.
+    private func uniqueScreensByDisplayIdentifier(_ screens: [NSScreen]) -> [NSScreen] {
+        var seenDisplayIdentifiers = Set<UInt32>()
+
+        return screens.filter { screen in
+            guard let screenNumber = screen.deviceDescription[
+                NSDeviceDescriptionKey("NSScreenNumber")
+            ] as? NSNumber else {
+                return true
+            }
+            return seenDisplayIdentifiers.insert(screenNumber.uint32Value).inserted
+        }
     }
 }
 

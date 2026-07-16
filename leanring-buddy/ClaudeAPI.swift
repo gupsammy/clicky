@@ -164,17 +164,12 @@ class ClaudeAPI {
             )
         }
 
-        // If non-2xx status, read the full body as error text
+        // Never surface the upstream body because it can echo request content.
         guard (200...299).contains(httpResponse.statusCode) else {
-            var errorBodyChunks: [String] = []
-            for try await line in byteStream.lines {
-                errorBodyChunks.append(line)
-            }
-            let errorBody = errorBodyChunks.joined(separator: "\n")
             throw NSError(
                 domain: "ClaudeAPI",
                 code: httpResponse.statusCode,
-                userInfo: [NSLocalizedDescriptionKey: "API Error (\(httpResponse.statusCode)): \(errorBody)"]
+                userInfo: [NSLocalizedDescriptionKey: "API error (HTTP \(httpResponse.statusCode))."]
             )
         }
 
@@ -267,11 +262,11 @@ class ClaudeAPI {
 
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
-            let responseString = String(data: data, encoding: .utf8) ?? "Unknown error"
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
             throw NSError(
                 domain: "ClaudeAPI",
-                code: (response as? HTTPURLResponse)?.statusCode ?? -1,
-                userInfo: [NSLocalizedDescriptionKey: "API Error: \(responseString)"]
+                code: statusCode,
+                userInfo: [NSLocalizedDescriptionKey: "API error (HTTP \(statusCode))."]
             )
         }
 
