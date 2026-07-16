@@ -9,7 +9,13 @@
 	<key>SUPublicEDKey</key>
 	<string>/l3d2rw5ZZFRU3AadP/w2Zf8FHfhA6bKv16BQOV5OSk=</string>
 	<key>VoiceTranscriptionProvider</key>
-	<string>apple</string>
+	<string>openai-realtime</string>
+	<key>ClickyAPIProxyBaseURL</key>
+	<string>https://clicky-proxy.sg-claude-git.workers.dev</string>
+	<key>OpenAIRealtimeTranscriptionModel</key>
+	<string>gpt-realtime-whisper</string>
+	<key>OpenAIRealtimeTranscriptionDelay</key>
+	<string>low</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Clicky uses your microphone so you can talk to it</string>
 	<key>NSScreenCaptureUsageDescription</key>

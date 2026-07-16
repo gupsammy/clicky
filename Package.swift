@@ -3,7 +3,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "ClickyAgentCore",
+    name: "ClickyCore",
     platforms: [
         .macOS(.v14)
     ],
@@ -11,6 +11,10 @@ let package = Package(
         .library(
             name: "ClickyAgentCore",
             targets: ["ClickyAgentCore"]
+        ),
+        .library(
+            name: "ClickyDictationCore",
+            targets: ["ClickyDictationCore"]
         )
     ],
     targets: [
@@ -22,6 +26,15 @@ let package = Package(
             name: "ClickyAgentCoreTests",
             dependencies: ["ClickyAgentCore"],
             path: "AgentCoreTests"
+        ),
+        .target(
+            name: "ClickyDictationCore",
+            path: "leanring-buddy/DictationCore"
+        ),
+        .testTarget(
+            name: "ClickyDictationCoreTests",
+            dependencies: ["ClickyDictationCore"],
+            path: "DictationCoreTests"
         )
     ]
 )

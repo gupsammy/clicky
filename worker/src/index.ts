@@ -8,6 +8,7 @@
  *   POST /chat              → Vertex AI Claude (streaming)
  *   POST /tts               → ElevenLabs TTS API
  *   POST /transcribe-token  → AssemblyAI temp token (legacy, unused with Apple Speech)
+ *   POST /openai-realtime-token → short-lived OpenAI Realtime client secret
  */
 
 interface Env {
@@ -17,6 +18,8 @@ interface Env {
   ELEVENLABS_API_KEY: string;
   ELEVENLABS_VOICE_ID: string;
   ASSEMBLYAI_API_KEY: string;
+  OPENAI_API_KEY: string;
+  CLICKY_PROXY_ACCESS_TOKEN: string;
 }
 
 interface ServiceAccountKey {
@@ -50,6 +53,17 @@ export default {
       if (url.pathname === "/transcribe-token") {
         return await handleTranscribeToken(env);
       }
+
+      if (url.pathname === "/openai-realtime-token") {
+        const authorizationFailure = authorizeRealtimeTokenRequest(
+          request,
+          env
+        );
+        if (authorizationFailure) {
+          return authorizationFailure;
+        }
+        return await handleOpenAIRealtimeToken(env);
+      }
     } catch (error) {
       console.error(`[${url.pathname}] Unhandled error:`, error);
       return new Response(
@@ -61,6 +75,49 @@ export default {
     return new Response("Not found", { status: 404 });
   },
 };
+
+function authorizeRealtimeTokenRequest(
+  request: Request,
+  env: Env
+): Response | undefined {
+  const configuredAccessToken = env.CLICKY_PROXY_ACCESS_TOKEN?.trim();
+  if (!configuredAccessToken || configuredAccessToken.length < 32) {
+    console.error("[auth] CLICKY_PROXY_ACCESS_TOKEN is missing or too short");
+    return new Response(
+      JSON.stringify({ error: "Worker authorization is not configured." }),
+      { status: 503, headers: { "content-type": "application/json" } }
+    );
+  }
+
+  const authorizationHeader = request.headers.get("authorization") ?? "";
+  const expectedAuthorizationHeader = `Bearer ${configuredAccessToken}`;
+  if (!constantTimeEqual(authorizationHeader, expectedAuthorizationHeader)) {
+    return new Response(
+      JSON.stringify({ error: "Unauthorized." }),
+      { status: 401, headers: { "content-type": "application/json" } }
+    );
+  }
+
+  return undefined;
+}
+
+function constantTimeEqual(
+  firstValue: string,
+  secondValue: string
+): boolean {
+  const comparisonLength = Math.max(firstValue.length, secondValue.length);
+  let difference = firstValue.length ^ secondValue.length;
+  for (
+    let characterIndex = 0;
+    characterIndex < comparisonLength;
+    characterIndex += 1
+  ) {
+    difference |=
+      (firstValue.charCodeAt(characterIndex) || 0)
+      ^ (secondValue.charCodeAt(characterIndex) || 0);
+  }
+  return difference === 0;
+}
 
 async function handleChat(request: Request, env: Env): Promise<Response> {
   // The Swift client builds a request body in the Anthropic Messages API shape
@@ -264,6 +321,93 @@ async function handleTranscribeToken(env: Env): Promise<Response> {
     status: 200,
     headers: { "content-type": "application/json" },
   });
+}
+
+async function handleOpenAIRealtimeToken(env: Env): Promise<Response> {
+  const response = await fetch(
+    "https://api.openai.com/v1/realtime/client_secrets",
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${env.OPENAI_API_KEY}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        session: {
+          type: "transcription",
+          audio: {
+            input: {
+              format: {
+                type: "audio/pcm",
+                rate: 24000,
+              },
+              transcription: {
+                model: "gpt-realtime-whisper",
+                language: "en",
+                delay: "low",
+              },
+              turn_detection: null,
+            },
+          },
+        },
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    const errorBody = await response.text();
+    console.error(`[/openai-realtime-token] OpenAI API error ${response.status}`);
+    return new Response(errorBody, {
+      status: response.status,
+      headers: {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+      },
+    });
+  }
+
+  const session = await response.json<{
+    value?: string;
+    expires_at?: number;
+    client_secret?: string | { value?: string; expires_at?: number };
+  }>();
+  const nestedClientSecret =
+    typeof session.client_secret === "object"
+      ? session.client_secret
+      : undefined;
+  const token =
+    session.value ??
+    (typeof session.client_secret === "string"
+      ? session.client_secret
+      : nestedClientSecret?.value);
+  const expiresAt = session.expires_at ?? nestedClientSecret?.expires_at;
+
+  if (!token) {
+    return new Response(
+      JSON.stringify({ error: "OpenAI did not return a client secret." }),
+      {
+        status: 502,
+        headers: {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+        },
+      }
+    );
+  }
+
+  return new Response(
+    JSON.stringify({
+      token,
+      expiresAt,
+    }),
+    {
+      status: 200,
+      headers: {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+      },
+    }
+  );
 }
 
 async function handleTTS(request: Request, env: Env): Promise<Response> {
