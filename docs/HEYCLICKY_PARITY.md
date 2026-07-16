@@ -23,7 +23,7 @@ PARTIAL OR NOT YET RELEASE-GREEN
   automatic spoken routing acceptance
   live model-authored spatial alignment
   long streaming CPU and 30-minute resilience soak
-  display hot-plug, VoiceOver, and complete TCC recovery matrix
+  accessibility semantics, display hot-plug, VoiceOver, and complete TCC recovery matrix
 
 DEFERRED FROM THIS MILESTONE
   full-duplex app-server/API Realtime voice
@@ -400,7 +400,7 @@ PR 8  Agent HUD/history/attachments/artifacts/notch UX                 3-4 turns
 PR 9  Realtime voice router + local memory/skills                      3-4 turns
 ```
 
-As of July 16, 2026, PRs 1-10, 12, and 13 are merged into `main`, with PR 13 landing at merge commit `a868367`. They establish the clean-room research baseline, subscription-backed Codex process protocol, safe workspace-scoped durable threads, concurrent task state and line-based HUD, OpenAI Realtime transcription with Worker-minted ephemeral credentials, safe focused-field fast dictation, screen-aware composition, explicit and automatic spoken routing, reviewed static spatial annotations, app-server-first companion vision/composition, concise attention delivery, cursor-trace grounding, and one-step TARGET/HOVER walkthroughs. The Foundation suite passes with 124 XCTest cases, 3 opt-in live tests, and 34 Swift Testing cases. The three live tests also pass against the installed authenticated Codex app-server: ChatGPT subscription handshake, ephemeral workspace-scoped thread defaults, and a response-only local-image companion turn. Both dictation modes, spoken routing, and the live narrated spatial paths still need the Xcode-run acceptance matrix before release.
+As of July 16, 2026, PRs 1-15 are merged into `main`, with PR 15 landing at merge commit `8e253eb`. They establish the clean-room research baseline, subscription-backed Codex process protocol, safe workspace-scoped durable threads, concurrent task state and line-based HUD, OpenAI Realtime transcription with Worker-minted ephemeral credentials, safe focused-field fast dictation, screen-aware composition, explicit and automatic spoken routing, reviewed static spatial annotations, app-server-first companion vision/composition, concise attention delivery, cursor-trace grounding, one-step TARGET/HOVER walkthroughs, and the first native shortcut/full-screen QA evidence. The Foundation suite passes with 124 XCTest cases, 3 opt-in live tests, and 34 Swift Testing cases. The three live tests also pass against the installed authenticated Codex app-server: ChatGPT subscription handshake, ephemeral workspace-scoped thread defaults, and a response-only local-image companion turn. A later native timed pass ran three independent three-to-five-minute agents to completion with persistent tokens and bounded 67-84 MB Clicky memory, but measured 25.9% mean and 46.4% peak Clicky CPU while streaming and interacting with the expanded HUD. Both dictation modes, spoken routing, live narrated spatial paths, accessibility semantics, and the full resilience duration still need the remaining Xcode-run acceptance matrix before release.
 
 Each PR should be developed in an isolated worktree, verified independently, opened as draft, and watched for both review comments and CI. Actionable feedback should be pulled, fixed, and re-verified until checks are green. Nothing should be merged without explicit user instruction.
 

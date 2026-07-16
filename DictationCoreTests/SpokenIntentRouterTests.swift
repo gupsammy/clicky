@@ -20,6 +20,18 @@ final class SpokenIntentRouterTests: XCTestCase {
             .agent(prompt: "run the tests")
         )
         XCTAssertEqual(
+            SpokenIntentRouter.route("agent can you run the tests"),
+            .agent(prompt: "can you run the tests")
+        )
+        XCTAssertEqual(
+            SpokenIntentRouter.route("agent please check Package.swift"),
+            .agent(prompt: "please check Package.swift")
+        )
+        XCTAssertEqual(
+            SpokenIntentRouter.route("agent please can you inspect the parser"),
+            .agent(prompt: "please can you inspect the parser")
+        )
+        XCTAssertEqual(
             SpokenIntentRouter.route("Hey Clicky agent inspect the parser"),
             .agent(prompt: "inspect the parser")
         )
@@ -50,6 +62,10 @@ final class SpokenIntentRouterTests: XCTestCase {
         )
         XCTAssertEqual(
             SpokenIntentRouter.route("Agent Smith is in this movie."),
+            .companion
+        )
+        XCTAssertEqual(
+            SpokenIntentRouter.route("Agent can be a demanding profession."),
             .companion
         )
         XCTAssertEqual(

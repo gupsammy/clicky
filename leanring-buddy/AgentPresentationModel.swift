@@ -432,13 +432,29 @@ final class AgentPresentationModel: ObservableObject {
     }
 
     func startTask() {
-        guard canRunTask,
-              let coordinator,
+        let prompt = newTaskPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else {
+            operationErrorMessage = "Enter a task for the agent."
+            return
+        }
+        guard connectionPhase.isConnected else {
+            operationErrorMessage = spokenTaskConnectionErrorMessage
+            return
+        }
+        guard selectedWorkspace != nil else {
+            operationErrorMessage = "Choose an Agent Folder, then start the prepared task."
+            return
+        }
+        guard !isPerformingOperation else {
+            operationErrorMessage = "Clicky is finishing another agent action. Try again when it finishes."
+            return
+        }
+        guard let coordinator,
               let workspace = selectedWorkspace else {
+            operationErrorMessage = "Reconnect Codex, then start the prepared task."
             return
         }
 
-        let prompt = newTaskPrompt
         let displayIdentifier = Self.displayIdentifierContainingMouse()
         let expectedGeneration = sessionGeneration
         isPerformingOperation = true

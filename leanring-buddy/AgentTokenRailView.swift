@@ -88,6 +88,9 @@ private struct AgentPersistentTokenView: View {
             .buttonStyle(.plain)
             .pointerCursor()
             .help("Open \(task.title)")
+            .accessibilityLabel(task.title)
+            .accessibilityValue("\(task.status.displayTitle). \(task.compactSummary)")
+            .accessibilityHint("Open agent details")
 
             if let dismissAction {
                 Button(action: dismissAction) {
@@ -100,6 +103,7 @@ private struct AgentPersistentTokenView: View {
                 .buttonStyle(.plain)
                 .pointerCursor()
                 .help("Dismiss agent")
+                .accessibilityLabel("Dismiss \(task.title)")
             }
         }
         .padding(.horizontal, 9)

@@ -92,6 +92,7 @@ struct AgentTaskDetailView: View {
                                 .foregroundColor(DS.Colors.textTertiary)
                                 .pointerCursor()
                                 .help("Dismiss error")
+                                .accessibilityLabel("Dismiss error")
                             }
                             .padding(12)
                             .background(
@@ -137,6 +138,7 @@ struct AgentTaskDetailView: View {
             .background(Circle().fill(DS.Colors.surface2))
             .pointerCursor()
             .help("Back to agents")
+            .accessibilityLabel("Back to agents")
 
             AgentTokenGlyph(task: task, size: 30)
 
@@ -317,6 +319,11 @@ struct AgentTaskDetailView: View {
                 .foregroundColor(DS.Colors.textPrimary)
                 .lineLimit(1...4)
                 .onSubmit(presentationModel.sendFollowUp)
+                .accessibilityLabel(
+                    task.status.isTerminal
+                        ? "Continue with this agent"
+                        : "Steer this agent"
+                )
 
                 Button(action: presentationModel.sendFollowUp) {
                     Image(systemName: "arrow.up")
@@ -332,6 +339,12 @@ struct AgentTaskDetailView: View {
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                         .isEmpty || presentationModel.isPerformingOperation
                 )
+                .accessibilityLabel(
+                    task.status.isTerminal
+                        ? "Continue agent"
+                        : "Steer agent"
+                )
+                .accessibilityHint("Send the follow-up text to this agent")
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 11)
@@ -547,6 +560,9 @@ private struct AgentUserInputCard: View {
         }
         .buttonStyle(.plain)
         .pointerCursor()
+        .accessibilityLabel(option.label)
+        .accessibilityValue(option.description)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 
     @ViewBuilder
@@ -568,6 +584,8 @@ private struct AgentUserInputCard: View {
                 .textFieldStyle(.plain)
                 .padding(10)
                 .background(fieldBackground)
+                .accessibilityLabel(question.question)
+                .accessibilityHint("Enter a private answer")
         } else {
             TextField(
                 question.options == nil ? "Type your answer" : "Or type another answer",
@@ -578,6 +596,12 @@ private struct AgentUserInputCard: View {
             .lineLimit(1...3)
             .padding(10)
             .background(fieldBackground)
+            .accessibilityLabel(question.question)
+            .accessibilityHint(
+                question.options == nil
+                    ? "Type your answer"
+                    : "Type another answer"
+            )
         }
     }
 

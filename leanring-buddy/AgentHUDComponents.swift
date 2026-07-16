@@ -35,6 +35,7 @@ struct AgentTokenGlyph: View {
             }
         }
         .frame(width: size, height: size)
+        .accessibilityHidden(true)
     }
 }
 
@@ -60,6 +61,9 @@ struct AgentStatusPill: View {
                         .stroke(status.displayColor.opacity(0.28), lineWidth: 0.7)
                 }
         )
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Agent status")
+        .accessibilityValue(status.displayTitle)
     }
 }
 
@@ -91,6 +95,7 @@ struct AgentProgressRail: View {
         }
         .frame(height: 2)
         .clipped()
+        .accessibilityHidden(true)
     }
 }
 
@@ -132,6 +137,9 @@ struct AgentTaskListRow: View {
             }
             .buttonStyle(.plain)
             .pointerCursor()
+            .accessibilityLabel(task.title)
+            .accessibilityValue("\(task.status.displayTitle). \(task.compactSummary)")
+            .accessibilityHint("Open agent details")
 
             if let stopAction {
                 Button(action: stopAction) {
@@ -144,6 +152,7 @@ struct AgentTaskListRow: View {
                 .buttonStyle(.plain)
                 .pointerCursor()
                 .help("Stop agent")
+                .accessibilityLabel("Stop \(task.title)")
             }
         }
         .padding(.horizontal, 14)
