@@ -29,8 +29,9 @@ The public repository is not merely an older UI. It contains the first product a
 The best path is not to clone the private app file-for-file. It is a clean-room evolution of this repo that keeps the proven microphone, shortcut, ScreenCaptureKit, and overlay code while replacing the one-shot Claude response path with two explicit OpenAI lanes:
 
 1. `gpt-realtime-whisper` or `gpt-4o-transcribe` for low-latency text dictation, with Apple Speech retained as an offline fallback.
-2. The locally authenticated Codex app-server for durable agent work, using the user's ChatGPT subscription when available.
-3. A later `gpt-realtime-2.1` voice lane for duplex conversation, barge-in, and voice routing to Codex threads. API-backed Realtime use requires an API credential; ChatGPT subscription authentication covers Codex app-server, not general OpenAI API calls.
+2. `gpt-5.6-luna` through the Responses API for slower screen-aware focused-field composition, with the focused app, bounded field text, and only the relevant display as context.
+3. The locally authenticated Codex app-server for durable agent work, using the user's ChatGPT subscription when available.
+4. A later Realtime voice lane for duplex conversation, barge-in, and voice routing to Codex threads. API-backed Realtime use requires an API credential; ChatGPT subscription authentication covers Codex app-server, not general OpenAI API calls.
 
 This ordering produces the highest user value without first rebuilding integrations, billing, proactive monitoring, or the commercial backend.
 
@@ -106,7 +107,7 @@ The [spatial-context demo](https://x.com/FarzaTV/status/2074973272463310905) rev
 
 ### July 14: fast and screen-aware dictation
 
-The [dictation demo](https://x.com/FarzaTV/status/2077130366230639022) establishes two separate shortcuts and latency expectations. `Fn + Control` is fast, literal streaming dictation into the focused text field. `Control + Option` is slower screen-aware composition: it reads the visible email, technical terminal output, slide, or other context and writes an appropriate result in the user's voice. Skills and memory can shape the composition. An adjacent founder post reports roughly 450 ms for the fast lane.
+The [dictation demo](https://x.com/FarzaTV/status/2077130366230639022) establishes two separate shortcuts and latency expectations. `Fn + Control` is fast, literal streaming dictation into the focused text field. `Control + Option` is slower screen-aware composition: it reads the visible email, technical terminal output, slide, or other context and writes an appropriate result in the user's voice. The fast lane visibly streams into Notes. The screen-aware lane shows `Listening` or `Speaking`, then `Thinking deeper`, and atomically inserts into Gmail, a Claude Code prompt, or a selected Slides text box without auto-sending. Skills and memory can shape the composition. An adjacent founder post reports roughly 450 ms for the fast lane, but does not define whether that measures interim or final text; the Gmail screen-aware example takes about five seconds after speech.
 
 ## Current public-repo baseline
 
@@ -219,9 +220,9 @@ fast literal dictation          contextual or agent request
         |                                  |
 gpt-realtime-whisper            screenshot + focused app/field context
 or gpt-4o-transcribe                       |
-        |                       companion response or Codex turn
+        |                         gpt-5.6-luna composition
 focused-field validation                   |
-        |                       optional gpt-realtime-2.1 audio response
+        |                       verified atomic field insertion
 Accessibility insertion
 ```
 
@@ -369,7 +370,7 @@ PR 8  Agent HUD/history/attachments/artifacts/notch UX                 3-4 turns
 PR 9  Realtime voice router + local memory/skills                      3-4 turns
 ```
 
-As of July 16, 2026, PRs 1-6 are open as green drafts. They establish the clean-room research baseline, subscription-backed Codex process protocol, safe workspace-scoped durable threads, HUD-independent concurrent task state, OpenAI Realtime transcription with Worker-minted ephemeral credentials, and safe focused-field fast dictation. No PR has been merged. Fast dictation still needs Xcode-run acceptance across native, browser, Electron, and remote text fields before release.
+As of July 16, 2026, PRs 1-7 are open as green drafts. They establish the clean-room research baseline, subscription-backed Codex process protocol, safe workspace-scoped durable threads, HUD-independent concurrent task state, OpenAI Realtime transcription with Worker-minted ephemeral credentials, safe focused-field fast dictation, and the distinct screen-aware composition lane. PR 7 adds a bounded OpenAI Responses Worker route, focused-display-only capture, completed-response and stale-field enforcement, Keychain-backed Worker authorization, and route-specific Cloudflare rate limits. No PR has been merged. Both dictation modes still need Xcode-run acceptance across native, browser, Electron, and remote text fields before release.
 
 Each PR should be developed in an isolated worktree, verified independently, opened as draft, and watched for both review comments and CI. Actionable feedback should be pulled, fixed, and re-verified until checks are green. Nothing should be merged without explicit user instruction.
 
@@ -381,7 +382,7 @@ First, JSON framing, request correlation, event reduction, state transitions, in
 
 Second, app-server contract tests should launch a local Codex child process against a temporary working directory using `read-only` or `workspace-write`, initialize it, start and interrupt a harmless turn, and assert streamed lifecycle events. The installed Codex on this Mac is currently authenticated through ChatGPT, so subscription-backed local testing is available.
 
-Third, Xcode GUI/manual acceptance runs must verify the real macOS surfaces: global shortcuts while another app is focused, microphone start/stop, focused-field insertion, pasteboard fallback, ScreenCaptureKit exclusion, multi-display overlays, notch expansion, concurrent agent status, approval prompts, interruption, relaunch/resume, and spoken completion. Xcode-driven verification must preserve the user's TCC grants.
+Third, Xcode GUI/manual acceptance runs must verify the real macOS surfaces: global shortcuts while another app is focused, microphone start/stop, focused-field insertion and replacement, stale-field refusal, ScreenCaptureKit exclusion, relevant-display selection, multi-display overlays, notch expansion, concurrent agent status, approval prompts, interruption, relaunch/resume, and spoken completion. Xcode-driven verification must preserve the user's TCC grants.
 
 Before the first PR, the repository needs at least one CI lane for non-TCC protocol/state tests. Full signed macOS UI automation is not a prerequisite for each PR, but every UI-bearing PR needs a documented manual acceptance recording or screenshot set.
 
@@ -389,7 +390,7 @@ Before the first PR, the repository needs at least one CI lane for non-TCC proto
 
 The inspected commercial app's full-access defaults should not be copied. A consumer agent that can execute commands and edit files needs visible scope, interruption, and approval behavior even if the user can opt into broader autonomy.
 
-The fork should default to an explicit Agent Folder, `workspace-write`, and `on-request`. It should show the exact command, working directory, and file changes when Codex requests approval. Full-disk or protected-folder access should remain a deliberate macOS permission event. Agent logs, prompts, transcripts, code, filenames, screenshots, and command output should remain local unless needed for the selected model call, and analytics should carry only coarse operational metadata.
+The fork should default to an explicit Agent Folder, `workspace-write`, and `on-request`. It should show the exact command, working directory, and file changes when Codex requests approval. Full-disk or protected-folder access should remain a deliberate macOS permission event. Agent logs, prompts, transcripts, code, filenames, screenshots, and command output should remain local unless needed for the selected model call, and analytics should carry only coarse operational metadata. Paid Worker routes must require an access token held in the Keychain and a Worker secret, plus route-specific Cloudflare rate limits. This is suitable for a self-hosted install; a distributed multi-user release still needs an authenticated backend that issues short-lived per-user or per-install sessions.
 
 The raw Anthropic credential currently present in local `HEAD` must be revoked even though `origin/main` already contains a removal commit. Deleting it from the current file does not invalidate copies in Git history.
 
@@ -421,3 +422,9 @@ OpenAI architecture sources:
 - [GPT-4o Transcribe](https://developers.openai.com/api/docs/models/gpt-4o-transcribe)
 - [GPT-Realtime-Whisper](https://developers.openai.com/api/docs/models/gpt-realtime-whisper)
 - [Realtime transcription guide](https://developers.openai.com/api/docs/guides/realtime-transcription)
+- [Latest-model selection guide](https://developers.openai.com/api/docs/guides/latest-model)
+- [GPT-5.6 Luna](https://developers.openai.com/api/docs/models/gpt-5.6-luna)
+- [Images and vision inputs](https://developers.openai.com/api/docs/guides/images-vision)
+- [Responses text generation](https://developers.openai.com/api/docs/guides/text)
+- [OpenAI API data controls](https://developers.openai.com/api/docs/guides/your-data)
+- [Cloudflare Workers rate limiting](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/)

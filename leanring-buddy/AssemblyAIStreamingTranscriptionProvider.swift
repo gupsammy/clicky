@@ -24,8 +24,14 @@ final class AssemblyAIStreamingTranscriptionProvider: BuddyTranscriptionProvider
     let displayName = "AssemblyAI"
     let requiresSpeechRecognitionPermission = false
 
-    var isConfigured: Bool { true }
-    var unavailableExplanation: String? { nil }
+    var isConfigured: Bool {
+        !Self.tokenProxyURL.contains("your-worker-name")
+            && ClickyProxyAuthorization.isConfigured
+    }
+    var unavailableExplanation: String? {
+        guard !isConfigured else { return nil }
+        return "AssemblyAI requires a Worker URL and access token."
+    }
 
     /// Single long-lived URLSession shared across all streaming sessions.
     /// Creating and invalidating a URLSession per session corrupts the OS
@@ -61,6 +67,7 @@ final class AssemblyAIStreamingTranscriptionProvider: BuddyTranscriptionProvider
     private func fetchTemporaryToken() async throws -> String {
         var request = URLRequest(url: URL(string: Self.tokenProxyURL)!)
         request.httpMethod = "POST"
+        try ClickyProxyAuthorization.authorize(&request)
 
         let (data, response) = try await URLSession.shared.data(for: request)
 

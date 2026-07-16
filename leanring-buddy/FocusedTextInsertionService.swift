@@ -16,6 +16,17 @@ struct DictationFocusContext {
     let focusedElement: AXUIElement
 }
 
+struct ScreenAwareFocusedTextContext {
+    let applicationName: String?
+    let windowTitle: String?
+    let selectedText: String?
+    let textBeforeSelection: String?
+    let textAfterSelection: String?
+    let focusedElementFrameInCoreGraphicsCoordinates: CGRect?
+    fileprivate let sourceValue: String
+    fileprivate let sourceSelectedRange: NSRange
+}
+
 enum FocusedTextInsertionMethod: String {
     case selectedText
     case valueReplacement
@@ -32,6 +43,8 @@ struct FocusedTextInsertionError: LocalizedError {
 
 @MainActor
 final class FocusedTextInsertionService {
+    private let maximumScreenAwareContextCharacterCount = 8_000
+
     func captureFocusContext() throws -> DictationFocusContext {
         guard AXIsProcessTrusted() else {
             throw FocusedTextInsertionError(
@@ -210,6 +223,89 @@ final class FocusedTextInsertionService {
         )
     }
 
+    func screenAwareContext(
+        for focusContext: DictationFocusContext
+    ) throws -> ScreenAwareFocusedTextContext {
+        try validateFocusContext(focusContext)
+        guard let currentTextState = textState(on: focusContext.focusedElement) else {
+            throw FocusedTextInsertionError(
+                message: "This text field does not expose enough context for screen-aware dictation."
+            )
+        }
+
+        let currentValue = currentTextState.value as NSString
+        let selectedRange = currentTextState.selectedRange
+        guard selectedRange.location != NSNotFound,
+              selectedRange.location <= currentValue.length,
+              selectedRange.length <= currentValue.length - selectedRange.location else {
+            throw FocusedTextInsertionError(
+                message: "The focused text selection is outside the current value."
+            )
+        }
+
+        let selectionEndLocation = selectedRange.location + selectedRange.length
+        let selectedText = boundedSubstringKeepingEnd(
+            of: currentValue,
+            in: selectedRange
+        )
+        let textBeforeSelection = boundedSubstringKeepingEnd(
+            of: currentValue,
+            in: NSRange(location: 0, length: selectedRange.location)
+        )
+        let textAfterSelection = boundedSubstringKeepingStart(
+            of: currentValue,
+            in: NSRange(
+                location: selectionEndLocation,
+                length: currentValue.length - selectionEndLocation
+            )
+        )
+
+        return ScreenAwareFocusedTextContext(
+            applicationName: NSRunningApplication(
+                processIdentifier: focusContext.applicationProcessIdentifier
+            )?.localizedName,
+            windowTitle: focusedWindowTitle(for: focusContext.focusedElement),
+            selectedText: selectedText,
+            textBeforeSelection: textBeforeSelection,
+            textAfterSelection: textAfterSelection,
+            focusedElementFrameInCoreGraphicsCoordinates: focusedElementFrame(
+                for: focusContext.focusedElement
+            ),
+            sourceValue: currentTextState.value,
+            sourceSelectedRange: currentTextState.selectedRange
+        )
+    }
+
+    func insertScreenAwareComposition(
+        compositionText: String,
+        into focusContext: DictationFocusContext,
+        matching screenAwareFocusedTextContext: ScreenAwareFocusedTextContext
+    ) async throws -> FocusedTextInsertionMethod {
+        try validateScreenAwareFocusedTextContext(
+            screenAwareFocusedTextContext,
+            for: focusContext
+        )
+
+        return try await insert(
+            transcriptText: compositionText,
+            into: focusContext
+        )
+    }
+
+    func validateScreenAwareFocusedTextContext(
+        _ screenAwareFocusedTextContext: ScreenAwareFocusedTextContext,
+        for focusContext: DictationFocusContext
+    ) throws {
+        try validateFocusContext(focusContext)
+        guard let currentTextState = textState(on: focusContext.focusedElement),
+              currentTextState.value == screenAwareFocusedTextContext.sourceValue,
+              currentTextState.selectedRange == screenAwareFocusedTextContext.sourceSelectedRange else {
+            throw FocusedTextInsertionError(
+                message: "The focused text changed while Clicky was composing, so Clicky did not insert the result."
+            )
+        }
+    }
+
     private func validateFocusContext(_ focusContext: DictationFocusContext) throws {
         guard let frontmostApplication = NSWorkspace.shared.frontmostApplication,
               frontmostApplication.processIdentifier == focusContext.applicationProcessIdentifier,
@@ -317,6 +413,123 @@ final class FocusedTextInsertionService {
                 length: selectedRange.length
             )
         )
+    }
+
+    private func focusedWindowTitle(for focusedElement: AXUIElement) -> String? {
+        var windowValue: AnyObject?
+        guard AXUIElementCopyAttributeValue(
+            focusedElement,
+            kAXWindowAttribute as CFString,
+            &windowValue
+        ) == .success,
+              let windowValue,
+              CFGetTypeID(windowValue) == AXUIElementGetTypeID() else {
+            return nil
+        }
+
+        var titleValue: AnyObject?
+        guard AXUIElementCopyAttributeValue(
+            windowValue as! AXUIElement,
+            kAXTitleAttribute as CFString,
+            &titleValue
+        ) == .success else {
+            return nil
+        }
+        return titleValue as? String
+    }
+
+    private func focusedElementFrame(for focusedElement: AXUIElement) -> CGRect? {
+        var positionValue: AnyObject?
+        var sizeValue: AnyObject?
+        guard AXUIElementCopyAttributeValue(
+            focusedElement,
+            kAXPositionAttribute as CFString,
+            &positionValue
+        ) == .success,
+              AXUIElementCopyAttributeValue(
+                focusedElement,
+                kAXSizeAttribute as CFString,
+                &sizeValue
+              ) == .success,
+              let positionValue,
+              let sizeValue,
+              CFGetTypeID(positionValue) == AXValueGetTypeID(),
+              CFGetTypeID(sizeValue) == AXValueGetTypeID() else {
+            return nil
+        }
+
+        var position = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(positionValue as! AXValue, .cgPoint, &position),
+              AXValueGetValue(sizeValue as! AXValue, .cgSize, &size) else {
+            return nil
+        }
+        return CGRect(origin: position, size: size)
+    }
+
+    // The focused element's AX value can be an entire multi-megabyte document,
+    // and screenAwareContext(for:) runs on the push-to-talk key-down path.
+    // Clamping the range to the UTF-16 budget BEFORE calling substring(with:)
+    // keeps each copy bounded instead of materializing the whole document and
+    // then truncating it.
+    private func boundedSubstringKeepingEnd(
+        of value: NSString,
+        in range: NSRange
+    ) -> String? {
+        guard range.length > 0 else { return nil }
+
+        var clampedRange = range
+        if range.length > maximumScreenAwareContextCharacterCount {
+            let budgetCutLocation = range.location + range.length
+                - maximumScreenAwareContextCharacterCount
+            // Snap the cut forward to the next composed character boundary so
+            // a surrogate pair or emoji cluster is never split at the edge.
+            let composedSequenceAtCut = value.rangeOfComposedCharacterSequence(
+                at: budgetCutLocation
+            )
+            let snappedCutLocation = composedSequenceAtCut.location == budgetCutLocation
+                ? budgetCutLocation
+                : min(
+                    composedSequenceAtCut.location + composedSequenceAtCut.length,
+                    range.location + range.length
+                )
+            clampedRange = NSRange(
+                location: snappedCutLocation,
+                length: range.location + range.length - snappedCutLocation
+            )
+        }
+
+        let boundedValue = value.substring(with: clampedRange)
+        return boundedValue.isEmpty ? nil : boundedValue
+    }
+
+    private func boundedSubstringKeepingStart(
+        of value: NSString,
+        in range: NSRange
+    ) -> String? {
+        guard range.length > 0 else { return nil }
+
+        var clampedRange = range
+        if range.length > maximumScreenAwareContextCharacterCount {
+            let budgetCutLocation = range.location
+                + maximumScreenAwareContextCharacterCount
+            // Snap the cut back to the start of the composed character it
+            // lands inside so a surrogate pair or emoji cluster is never split.
+            let composedSequenceAtCut = value.rangeOfComposedCharacterSequence(
+                at: budgetCutLocation
+            )
+            let snappedCutLocation = max(
+                composedSequenceAtCut.location,
+                range.location
+            )
+            clampedRange = NSRange(
+                location: range.location,
+                length: snappedCutLocation - range.location
+            )
+        }
+
+        let boundedValue = value.substring(with: clampedRange)
+        return boundedValue.isEmpty ? nil : boundedValue
     }
 
     private func applyInsertionPlan(

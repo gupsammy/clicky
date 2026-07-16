@@ -6,3 +6,27 @@ compatibility_date = "2024-01-01"
 ELEVENLABS_VOICE_ID = "kPzsL2i3teMYv0FxEYQ6"
 VERTEX_PROJECT_ID = "majestic-fuze-387008"
 VERTEX_REGION = "us-east5"
+
+[[ratelimits]]
+name = "GENERAL_API_RATE_LIMITER"
+namespace_id = "2037041570"
+
+  [ratelimits.simple]
+  limit = 120
+  period = 60
+
+[[ratelimits]]
+name = "OPENAI_REALTIME_TOKEN_RATE_LIMITER"
+namespace_id = "2037041571"
+
+  [ratelimits.simple]
+  limit = 60
+  period = 60
+
+[[ratelimits]]
+name = "OPENAI_SCREEN_COMPOSITION_RATE_LIMITER"
+namespace_id = "2037041572"
+
+  [ratelimits.simple]
+  limit = 20
+  period = 60
