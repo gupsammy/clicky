@@ -69,6 +69,8 @@ final class CompanionManager: ObservableObject {
     let overlayWindowManager = OverlayWindowManager()
     private let focusedTextInsertionService = FocusedTextInsertionService()
     private let openAIScreenCompositionClient = OpenAIScreenCompositionClient()
+    private let agentPresentationModel: AgentPresentationModel
+    private let systemSpeechSynthesizer = NSSpeechSynthesizer()
     // Response text is now displayed inline on the cursor overlay via
     // streamingResponseText, so no separate response overlay manager is needed.
 
@@ -110,6 +112,10 @@ final class CompanionManager: ObservableObject {
     /// Distinguishes a superseded response task from the task currently
     /// exposed through `currentResponseTask` when cancellation completes late.
     private var currentResponseGeneration = 0
+
+    init(agentPresentationModel: AgentPresentationModel) {
+        self.agentPresentationModel = agentPresentationModel
+    }
 
     /// True when all three required permissions (accessibility, screen recording,
     /// microphone) are granted. Used by the panel to show a single "all good" state.
@@ -312,6 +318,8 @@ final class CompanionManager: ObservableObject {
     func stop() {
         globalPushToTalkShortcutMonitor.stop()
         buddyDictationManager.cancelCurrentDictation()
+        elevenLabsTTSClient.stopPlayback()
+        systemSpeechSynthesizer.stopSpeaking()
         activeFastDictationFocusContext = nil
         fastDictationStartedAt = nil
         activeScreenAwareDictationFocusContext = nil
@@ -580,6 +588,7 @@ final class CompanionManager: ObservableObject {
             // Cancel any in-progress response and TTS from a previous utterance
             currentResponseTask?.cancel()
             elevenLabsTTSClient.stopPlayback()
+            systemSpeechSynthesizer.stopSpeaking()
             clearDetectedElementLocation()
 
             // Dismiss the onboarding prompt if it's showing
@@ -611,15 +620,37 @@ final class CompanionManager: ObservableObject {
                         guard let self else { return }
                         self.lastTranscript = finalTranscript
                         print("🗣️ Companion received final transcript (\(finalTranscript.count) characters)")
-                        if let focusContext = self.activeScreenAwareDictationFocusContext,
-                           let focusedTextContext = self.activeScreenAwareFocusedTextContext {
+                        let spokenRequestRoute = SpokenIntentRouter.route(
+                            finalTranscript,
+                            hasScreenAwareDestination: self.activeScreenAwareDictationFocusContext != nil
+                        )
+                        switch spokenRequestRoute {
+                        case .agent(let agentPrompt):
+                            self.routeSpokenRequestToAgent(prompt: agentPrompt)
+                        case .invalidAgentTrigger:
+                            self.reportSpokenRoutingFailure(
+                                "Say what the agent should do after 'agent'."
+                            )
+                        case .screenAwareComposition:
+                            guard let focusContext = self.activeScreenAwareDictationFocusContext else {
+                                self.reportSpokenRoutingFailure(
+                                    "The focused text field is no longer available."
+                                )
+                                break
+                            }
+                            guard let focusedTextContext = self.activeScreenAwareFocusedTextContext else {
+                                self.reportSpokenRoutingFailure(
+                                    "The focused text field context is no longer available."
+                                )
+                                break
+                            }
                             self.composeAndInsertScreenAwareText(
                                 spokenInstruction: finalTranscript,
                                 focusContext: focusContext,
                                 focusedTextContext: focusedTextContext,
                                 startedAt: self.screenAwareDictationStartedAt
                             )
-                        } else {
+                        case .companion:
                             ClickyAnalytics.trackUserMessageSent(transcript: finalTranscript)
                             self.sendTranscriptToClaudeWithScreenshot(transcript: finalTranscript)
                         }
@@ -650,6 +681,23 @@ final class CompanionManager: ObservableObject {
         case .none:
             break
         }
+    }
+
+    private func routeSpokenRequestToAgent(prompt: String) {
+        currentResponseTask?.cancel()
+        elevenLabsTTSClient.stopPlayback()
+        systemSpeechSynthesizer.stopSpeaking()
+        clearDetectedElementLocation()
+        agentPresentationModel.startSpokenTask(prompt: prompt)
+        voiceState = .idle
+        scheduleTransientHideIfNeeded()
+    }
+
+    private func reportSpokenRoutingFailure(_ errorMessage: String) {
+        buddyDictationManager.lastErrorMessage = errorMessage
+        NSSound.beep()
+        voiceState = .idle
+        scheduleTransientHideIfNeeded()
     }
 
     private func handleFastDictationShortcutTransition(
@@ -1003,7 +1051,7 @@ final class CompanionManager: ObservableObject {
                     } catch {
                         ClickyAnalytics.trackTTSError(error: error)
                         print("⚠️ ElevenLabs TTS error: \(error)")
-                        speakCreditsErrorFallback()
+                        await speakWithSystemVoice(spokenText)
                     }
                 }
             } catch is CancellationError {
@@ -1011,7 +1059,10 @@ final class CompanionManager: ObservableObject {
             } catch {
                 ClickyAnalytics.trackResponseError(error: error)
                 print("⚠️ Companion response error: \(error)")
-                speakCreditsErrorFallback()
+                buddyDictationManager.lastErrorMessage = "The companion service is unavailable. Agent requests still work with the agent trigger."
+                await speakWithSystemVoice(
+                    "I couldn't reach the companion service. Say Hey Clicky, agent, followed by a task to start Codex."
+                )
             }
 
             if !Task.isCancelled {
@@ -1062,14 +1113,18 @@ final class CompanionManager: ObservableObject {
         }
     }
 
-    /// Speaks a hardcoded error message using macOS system TTS when API
-    /// credits run out. Uses NSSpeechSynthesizer so it works even when
-    /// ElevenLabs is down.
-    private func speakCreditsErrorFallback() {
-        let utterance = "I'm all out of credits. Please DM Farza and tell him to bring me back to life."
-        let synthesizer = NSSpeechSynthesizer()
-        synthesizer.startSpeaking(utterance)
+    private func speakWithSystemVoice(_ utterance: String) async {
+        systemSpeechSynthesizer.stopSpeaking()
+        systemSpeechSynthesizer.startSpeaking(utterance)
         voiceState = .responding
+        while systemSpeechSynthesizer.isSpeaking {
+            do {
+                try await Task.sleep(for: .milliseconds(100))
+            } catch {
+                systemSpeechSynthesizer.stopSpeaking()
+                return
+            }
+        }
     }
 
     // MARK: - Point Tag Parsing

@@ -450,6 +450,31 @@ final class AgentPresentationModel: ObservableObject {
         }
     }
 
+    func startSpokenTask(prompt: String) {
+        let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPrompt.isEmpty else { return }
+
+        newTaskPrompt = trimmedPrompt
+        route = .overview
+        isNotchExpanded = true
+        operationErrorMessage = nil
+
+        guard connectionPhase.isConnected else {
+            operationErrorMessage = spokenTaskConnectionErrorMessage
+            return
+        }
+        guard selectedWorkspace != nil else {
+            operationErrorMessage = "Choose an Agent Folder, then start the prepared task."
+            return
+        }
+        guard !isPerformingOperation else {
+            operationErrorMessage = "Clicky is finishing another agent action. Your spoken task is ready in the composer."
+            return
+        }
+
+        startTask()
+    }
+
     func sendFollowUp() {
         guard let coordinator,
               let selectedTask,
@@ -686,6 +711,21 @@ final class AgentPresentationModel: ObservableObject {
     private var selectedWorkspace: CodexAgentWorkspace? {
         guard let workspacePath else { return nil }
         return try? CodexAgentWorkspace(directoryURL: URL(fileURLWithPath: workspacePath))
+    }
+
+    private var spokenTaskConnectionErrorMessage: String {
+        switch connectionPhase {
+        case .needsAuthentication:
+            return "Sign in with ChatGPT, then start the prepared task."
+        case .failed:
+            return "Reconnect Codex, then start the prepared task."
+        case .connecting:
+            return "Codex is still connecting. Your spoken task is ready in the composer."
+        case .idle:
+            return "Start Codex, then run the prepared task."
+        case .connected:
+            return "Codex is not ready to start this task yet."
+        }
     }
 
     private func workspace(

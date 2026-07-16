@@ -75,7 +75,7 @@ Worker vars: `ELEVENLABS_VOICE_ID`, `VERTEX_PROJECT_ID`, `VERTEX_REGION`, `OPENA
 | File | Lines | Purpose |
 |------|-------|---------|
 | `leanring_buddyApp.swift` | ~98 | Menu bar app entry point. Uses `@NSApplicationDelegateAdaptor` with `CompanionAppDelegate`, which creates the companion panel plus agent coordinator/presentation/HUD managers and starts `CompanionManager`. No main window — the app lives entirely in the status bar. |
-| `CompanionManager.swift` | ~1255 | Central state machine. Owns shortcut routing, literal and screen-aware dictation, focused-field insertion, screen capture, Claude API, ElevenLabs TTS, and overlay management. Tracks voice state, conversation history, model selection, and cursor visibility. |
+| `CompanionManager.swift` | ~1340 | Central state machine. Owns shortcut routing, literal and screen-aware dictation, focused-field insertion, screen capture, Claude API, ElevenLabs TTS, and overlay management. Tracks voice state, conversation history, model selection, and cursor visibility. |
 | `MenuBarPanelManager.swift` | ~255 | NSStatusItem + custom NSPanel lifecycle. Creates the menu bar icon, manages the floating companion panel, opens the agent HUD, and installs click-outside-to-dismiss behavior. |
 | `CompanionPanelView.swift` | ~761 | SwiftUI panel content for the menu bar dropdown. Shows companion status, push-to-talk instructions, model picker (Sonnet/Opus), permissions UI, DM feedback button, and quit button. Dark aesthetic using `DS` design system. |
 | `OverlayWindow.swift` | ~863 | Full-screen transparent overlay hosting the blue cursor, response text, waveform, and spinner. Handles cursor following, element pointing with bezier arcs, multi-monitor coordinate mapping, and fade-out transitions. |
@@ -95,6 +95,7 @@ Worker vars: `ELEVENLABS_VOICE_ID`, `VERTEX_PROJECT_ID`, `VERTEX_REGION`, `OPENA
 | `ClickyProxyAuthorization.swift` | ~64 | Reads the deployment-specific Worker bearer token from the macOS Keychain and authorizes proxy requests without embedding it in the app. |
 | `AppleSpeechTranscriptionProvider.swift` | ~147 | Local fallback transcription provider backed by Apple's Speech framework. |
 | `BuddyAudioConversionSupport.swift` | ~108 | Audio conversion helpers. Converts live mic buffers to PCM16 mono audio and builds WAV payloads for upload-based providers. |
+| `DictationCore/SpokenIntentRouter.swift` | ~85 | Pure explicit voice-route parser. Recognizes punctuation-tolerant “Hey Clicky, agent” commands before composition or companion fallback and refuses incomplete triggers. |
 | `GlobalPushToTalkShortcutMonitor.swift` | ~168 | System-wide push-to-talk monitor. Owns the listen-only `CGEvent` tap, resolves exact fast-dictation versus companion chords, requires a neutral state between chords, and publishes typed press/release events. |
 | `ClaudeAPI.swift` | ~291 | Claude vision API client with streaming (SSE) and non-streaming modes. TLS warmup optimization, image MIME detection, conversation history support. |
 | `OpenAIAPI.swift` | ~142 | OpenAI GPT vision API client. |
