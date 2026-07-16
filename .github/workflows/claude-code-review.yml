@@ -35,6 +35,10 @@ jobs:
       - name: Run Claude Code Review
         id: claude-review
         uses: anthropics/claude-code-action@v1
+        # On workflow_dispatch the action has no PR context, so Claude's gh
+        # commands need explicit credentials to post the review
+        env:
+          GH_TOKEN: ${{ github.token }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # track_progress needs a PR event context; disabled for manual dispatch
@@ -84,7 +88,13 @@ jobs:
               project name.
 
             ## Phase 4 — Output
-            Post inline comments on specific lines, classified by severity:
+            If the mcp__github_inline_comment__create_inline_comment tool is available,
+            post inline comments on specific lines. If it is NOT available (manual
+            dispatch runs), do not attempt inline comments — instead include every
+            finding with its file path and line number in the summary comment, and post
+            that comment with: gh pr comment <PR_NUMBER> --body-file <file you wrote>.
+
+            Classify findings by severity:
             - 🔴 Must fix — bugs, security vulnerabilities, data loss risks
             - 🟡 Should fix — error handling gaps, performance issues, API design concerns
             - 🟢 Suggestion — alternative approaches, minor optimizations, readability wins
@@ -96,4 +106,4 @@ jobs:
             feedback.
           claude_args: |
             --model sonnet
-            --allowedTools "Read,Glob,Grep,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),mcp__github_inline_comment__create_inline_comment"
+            --allowedTools "Read,Write,Glob,Grep,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),mcp__github_inline_comment__create_inline_comment"

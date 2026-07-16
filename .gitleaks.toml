@@ -1,0 +1,9 @@
+# Extends the default gitleaks ruleset with project-specific allowlist entries
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Known non-secret keys"
+# PostHog project API keys (phc_...) are public, write-only, and designed to
+# ship client-side — not a secret. Present in ClickyAnalytics.swift by design.
+regexes = ['''phc_[A-Za-z0-9_]+''']

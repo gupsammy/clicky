@@ -30,6 +30,7 @@ concurrency:
 
 permissions:
   contents: read
+  statuses: write
 
 jobs:
   build:
@@ -69,3 +70,15 @@ jobs:
             -configuration Debug \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGN_IDENTITY=""
+
+      # Dispatched runs aren't attached to the PR, so surface the result as a
+      # commit status on the PR head — that's what the PR checks box reads
+      - name: Report result on PR head commit (manual dispatch only)
+        if: ${{ always() && github.event_name == 'workflow_dispatch' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/${{ github.repository }}/statuses/$(git rev-parse HEAD) \
+            -f state="${{ job.status == 'success' && 'success' || 'failure' }}" \
+            -f context="App Build (manual)" \
+            -f target_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
