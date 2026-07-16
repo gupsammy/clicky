@@ -1,0 +1,55 @@
+name: Claude Code Analysis
+
+on:
+  workflow_dispatch:
+    inputs:
+      analysis_type:
+        description: "Type of analysis to perform"
+        required: true
+        type: choice
+        options:
+          - security-review
+          - summarize-recent-changes
+          - architecture-overview
+
+jobs:
+  claude-analysis:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write   # Required for OAuth token auth
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Claude Code
+        run: mkdir -p ~/.local/bin && npm install -g @anthropic-ai/claude-code
+
+      - name: Run Claude Code Analysis
+        id: claude-analysis
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Perform a "${{ inputs.analysis_type }}" analysis of this repository.
+
+            Start by reading CLAUDE.md for the architecture: a menu-bar-only macOS app
+            (SwiftUI + AppKit) with all external API calls proxied through the Cloudflare
+            Worker in worker/src/index.ts.
+
+            - security-review: Audit for secrets in the app bundle, Swift source, or build
+              settings (everything sensitive must live on the Worker); review Worker route
+              input handling; check permission (TCC) flows for microphone, screen
+              recording, and accessibility.
+            - summarize-recent-changes: Summarize the last 20 commits' themes and notable
+              changes using git log and diffs.
+            - architecture-overview: Describe the current architecture, comparing it
+              against CLAUDE.md and flagging any drift between the doc and the code.
+
+            Write the full analysis to the workflow run output.
+          claude_args: |
+            --model sonnet
+            --allowedTools "Read,Glob,Grep,Bash(gh:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*)"

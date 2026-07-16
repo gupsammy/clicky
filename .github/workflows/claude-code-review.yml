@@ -3,42 +3,87 @@ name: Claude Code Review
 on:
   pull_request:
     types: [opened, synchronize, ready_for_review, reopened]
-    # Optional: Only run on specific file changes
-    # paths:
-    #   - "src/**/*.ts"
-    #   - "src/**/*.tsx"
-    #   - "src/**/*.js"
-    #   - "src/**/*.jsx"
 
 jobs:
   claude-review:
-    # Optional: Filter by PR author
-    # if: |
-    #   github.event.pull_request.user.login == 'external-contributor' ||
-    #   github.event.pull_request.user.login == 'new-developer' ||
-    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
-
+    # Skip draft PRs — reviews run once a PR is opened as ready or marked ready-for-review
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
-      pull-requests: read
-      issues: read
-      id-token: write
-
+      pull-requests: write   # Post inline review comments and the summary comment
+      id-token: write        # Required for OAuth token auth
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 1
+
+      - name: Install Claude Code
+        run: mkdir -p ~/.local/bin && npm install -g @anthropic-ai/claude-code
 
       - name: Run Claude Code Review
         id: claude-review
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
-          plugins: 'code-review@claude-code-plugins'
-          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
-          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
+          track_progress: true
+          prompt: |
+            Review PR #${{ github.event.pull_request.number }} in ${{ github.repository }}.
 
+            ## Phase 1 — Context Discovery
+            Read CLAUDE.md for the architecture and conventions: this is a menu-bar-only
+            macOS app (SwiftUI + AppKit bridging, MVVM, @MainActor isolation) where all
+            external API calls are proxied through a Cloudflare Worker (worker/src/index.ts)
+            that holds the secrets. Run `gh pr diff` to get the full diff, then categorize
+            changed files: Swift app sources, Cloudflare Worker, Xcode project config
+            (project.pbxproj, Info.plist), docs, CI.
+
+            ## Phase 2 — Change Comprehension
+            Summarize the PR's intent in one sentence. Read the surrounding code, not just
+            the diff — especially CompanionManager.swift (the central state machine) when
+            the change touches the voice pipeline. Identify the existing patterns the change
+            should follow (transcription-provider protocol, DS design tokens, shared
+            URLSession for AssemblyAI) before critiquing anything.
+
+            ## Phase 3 — Deep Analysis
+            Evaluate the diff against these dimensions:
+
+            - Correctness & concurrency: @MainActor violations, races in the push-to-talk
+              state machine (idle/listening/processing/responding), retain cycles in
+              closures bridging AppKit and SwiftUI, websocket lifecycle bugs.
+            - Security: any API key or secret landing in the app bundle, Swift source, or
+              build settings — everything sensitive must stay on the Cloudflare Worker.
+              Input validation on Worker routes. Screenshot or audio data leaving the app
+              through anything other than the Worker proxy.
+            - Error handling: silent failures in async pipelines (transcription, TTS,
+              screen capture), missing permission-denied paths (microphone, screen
+              recording, accessibility/TCC).
+            - API & interface: changes to Worker route contracts (/chat, /tts,
+              /transcribe-token) that would break the app, and changes to the
+              [POINT:x,y:label:screenN] tag protocol between Claude responses and the
+              cursor overlay.
+            - Performance: main-thread blocking in audio or capture hot paths, and
+              per-session URLSession creation — the AssemblyAI URLSession must stay
+              shared across sessions (known landmine documented in CLAUDE.md).
+            - Maintainability: CLAUDE.md's naming convention (clarity over concision, no
+              abbreviated names, props passed with their original names), over-engineering,
+              dead code. Do NOT flag the known Swift 6 concurrency warnings, the deprecated
+              onChange in OverlayWindow.swift, or the intentional "leanring" typo in the
+              project name.
+
+            ## Phase 4 — Output
+            Post inline comments on specific lines, classified by severity:
+            - 🔴 Must fix — bugs, security vulnerabilities, data loss risks
+            - 🟡 Should fix — error handling gaps, performance issues, API design concerns
+            - 🟢 Suggestion — alternative approaches, minor optimizations, readability wins
+            - ❓ Question — clarification needed, intent unclear, design choice to discuss
+
+            Then post a single top-level summary comment with: a one-sentence PR summary,
+            an overall assessment, key findings grouped by severity, and positive callouts
+            for well-written code. If no issues are found, say so — don't manufacture
+            feedback.
+          claude_args: |
+            --model sonnet
+            --allowedTools "Read,Glob,Grep,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),mcp__github_inline_comment__create_inline_comment"
