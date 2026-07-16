@@ -30,8 +30,10 @@ struct leanring_buddyApp: App {
 @MainActor
 final class CompanionAppDelegate: NSObject, NSApplicationDelegate {
     private var menuBarPanelManager: MenuBarPanelManager?
-    private let companionManager = CompanionManager()
     private let agentPresentationModel = AgentPresentationModel()
+    private lazy var companionManager = CompanionManager(
+        agentPresentationModel: agentPresentationModel
+    )
     private var agentHUDWindowManager: AgentHUDWindowManager?
     private var sparkleUpdaterController: SPUStandardUpdaterController?
 
