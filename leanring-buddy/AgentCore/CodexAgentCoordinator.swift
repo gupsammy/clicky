@@ -27,6 +27,13 @@ actor CodexAgentCoordinator {
     private let taskStore: CodexAgentTaskStore
     private var hasStarted = false
     private static let maximumHydratedHistoryThreads = 20
+    static let defaultAppServerArguments = [
+        "--enable",
+        "default_mode_request_user_input"
+    ]
+    static let durableAgentDeveloperInstructions = """
+    Operate as a durable background agent inside Clicky. Work autonomously until the requested outcome is complete. Use a safe, reasonable default whenever one exists instead of asking the user to choose. Do not end a turn with an ordinary assistant-text question. If progress is genuinely blocked by a user decision and no safe default exists, use the structured request_user_input tool and wait for the answer. Before reporting completion, create every requested artifact and run proportionate validation. Report actual results and unresolved blockers; do not claim completion for a plan or proposed next step.
+    """
 
     init(
         client: CodexAppServerClient,
@@ -40,7 +47,11 @@ actor CodexAgentCoordinator {
     }
 
     static func makeLive() throws -> CodexAgentCoordinator {
-        CodexAgentCoordinator(client: try CodexAppServerClient.makeLive())
+        CodexAgentCoordinator(
+            client: try CodexAppServerClient.makeLive(
+                extraAppServerArguments: defaultAppServerArguments
+            )
+        )
     }
 
     func start() async throws -> CodexAppServerSession {
@@ -119,7 +130,8 @@ actor CodexAgentCoordinator {
     ) async throws -> String {
         let threadResponse = try await client.startThread(
             in: workspace,
-            model: model
+            model: model,
+            developerInstructions: Self.durableAgentDeveloperInstructions
         )
         let title = Self.taskTitle(from: prompt)
         await taskStore.registerPendingThread(

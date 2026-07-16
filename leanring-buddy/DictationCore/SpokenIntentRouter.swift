@@ -13,6 +13,7 @@ public enum SpokenAgentConversationContext: Equatable, Sendable {
     case none
     case selected
     case soleRunning
+    case waitingForInput
     case ambiguous
 
     fileprivate var hasPotentialFollowUpTarget: Bool {
@@ -39,6 +40,13 @@ public enum SpokenIntentRouter {
             return .agent(prompt: prompt)
         }
 
+        if let prompt = promptAfterSingleWordAgentTrigger(
+            in: trimmedTranscript
+        ) {
+            guard !prompt.isEmpty else { return .invalidAgentTrigger }
+            return .agent(prompt: prompt)
+        }
+
         for followUpWakePhraseWords in spokenFollowUpWakePhraseWords {
             guard let prompt = promptAfterWakePhrase(
                 followUpWakePhraseWords,
@@ -48,25 +56,14 @@ public enum SpokenIntentRouter {
             return .agentFollowUp(prompt: prompt)
         }
 
-        if trimmedTranscript.range(
-            of: "agent:",
-            options: [.anchored, .caseInsensitive]
-        ) != nil {
-            let promptStartIndex = trimmedTranscript.index(
-                trimmedTranscript.startIndex,
-                offsetBy: "agent:".count
-            )
-            let prompt = promptAfterRemovingLeadingTriggerSeparators(
-                from: trimmedTranscript[promptStartIndex...]
-            )
-            guard !prompt.isEmpty else { return .invalidAgentTrigger }
-            return .agent(prompt: prompt)
-        }
-
         if requestsSoftNoAgent(trimmedTranscript) {
             return .companion
         }
         if isAgentStatusQuery(trimmedTranscript) { return .agentStatus }
+
+        if agentConversationContext == .waitingForInput {
+            return .agentFollowUp(prompt: trimmedTranscript)
+        }
 
         // High-confidence NEW work must win over follow-up steering in every
         // context, not just .ambiguous: an unrelated multi-step request
@@ -140,6 +137,33 @@ public enum SpokenIntentRouter {
         "send",
         "transcribe",
         "upload"
+    ]
+
+    private static let explicitAgentCommandVerbs = [
+        "ask",
+        "audit",
+        "build",
+        "clean",
+        "create",
+        "debug",
+        "do",
+        "edit",
+        "fix",
+        "implement",
+        "inspect",
+        "investigate",
+        "make",
+        "prepare",
+        "read",
+        "research",
+        "review",
+        "run",
+        "start",
+        "summarize",
+        "test",
+        "transcribe",
+        "update",
+        "write"
     ]
 
     private static let agentScopeWords = [
@@ -294,6 +318,53 @@ public enum SpokenIntentRouter {
         }
         return remainingTranscript[promptStartIndex...]
             .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func promptAfterSingleWordAgentTrigger(
+        in transcript: String
+    ) -> String? {
+        guard transcript.range(
+            of: "agent",
+            options: [.anchored, .caseInsensitive]
+        ) != nil else {
+            return nil
+        }
+
+        let boundaryStartIndex = transcript.index(
+            transcript.startIndex,
+            offsetBy: "agent".count
+        )
+        guard boundaryStartIndex < transcript.endIndex else { return "" }
+        guard isPromptSeparator(transcript[boundaryStartIndex]) else {
+            return nil
+        }
+
+        var promptStartIndex = boundaryStartIndex
+        var boundaryContainsPunctuation = false
+        while promptStartIndex < transcript.endIndex,
+              isPromptSeparator(transcript[promptStartIndex]) {
+            if String(transcript[promptStartIndex]).rangeOfCharacter(
+                from: .punctuationCharacters
+            ) != nil {
+                boundaryContainsPunctuation = true
+            }
+            promptStartIndex = transcript.index(after: promptStartIndex)
+        }
+
+        let prompt = transcript[promptStartIndex...]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else { return "" }
+        if boundaryContainsPunctuation {
+            return prompt
+        }
+
+        let normalizedPrompt = normalizedWords(in: prompt)
+        guard explicitAgentCommandVerbs.contains(where: {
+            normalizedPrompt == $0 || normalizedPrompt.hasPrefix($0 + " ")
+        }) else {
+            return nil
+        }
+        return prompt
     }
 
     private static func isLikelyAgentFollowUp(_ transcript: String) -> Bool {

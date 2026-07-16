@@ -127,7 +127,7 @@ struct AgentNotchView: View {
             Button {
                 presentationModel.chooseWorkspace()
             } label: {
-                Image(systemName: "gearshape")
+                Image(systemName: "folder")
                     .font(.system(size: 12, weight: .semibold))
                     .frame(width: 30, height: 30)
             }
@@ -136,6 +136,23 @@ struct AgentNotchView: View {
             .background(Circle().fill(DS.Colors.surface2))
             .pointerCursor()
             .help("Choose Agent Folder")
+
+            Button {
+                presentationModel.collapseNotch()
+                NotificationCenter.default.post(
+                    name: .clickyShowPanel,
+                    object: nil
+                )
+            } label: {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(width: 30, height: 30)
+            }
+            .buttonStyle(.plain)
+            .foregroundColor(DS.Colors.textTertiary)
+            .background(Circle().fill(DS.Colors.surface2))
+            .pointerCursor()
+            .help("Open Clicky Settings")
 
             Button {
                 presentationModel.collapseNotch()

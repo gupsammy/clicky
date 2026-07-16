@@ -60,6 +60,39 @@ final class CodexAgentThreadTests: XCTestCase {
         await client.stop()
     }
 
+    func testCoordinatorStartsDurableBackgroundAgentWithAutonomyInstructions() async throws {
+        let transport = AgentThreadMockTransport()
+        let client = makeClient(transport: transport)
+        let coordinator = CodexAgentCoordinator(client: client)
+        let workspace = try currentWorkspace()
+        _ = try await coordinator.start()
+
+        _ = try await coordinator.startTask(
+            prompt: "Build and validate a small website.",
+            in: workspace
+        )
+
+        let startParameters = try parametersObject(
+            transport.lastParameters(for: "thread/start")
+        )
+        guard case .string(let developerInstructions)? =
+            startParameters["developerInstructions"] else {
+            return XCTFail("Expected durable background-agent instructions")
+        }
+        XCTAssertTrue(developerInstructions.contains("Work autonomously"))
+        XCTAssertTrue(developerInstructions.contains("request_user_input"))
+        XCTAssertTrue(developerInstructions.contains("Do not end a turn"))
+        XCTAssertTrue(developerInstructions.contains("run proportionate validation"))
+
+        let initializeParameters = try parametersObject(
+            transport.lastParameters(for: "initialize")
+        )
+        let capabilities = try parametersObject(initializeParameters["capabilities"])
+        XCTAssertEqual(capabilities["experimentalApi"], .boolean(true))
+
+        await coordinator.stop()
+    }
+
     func testThreadListAndReadAreScopedAndIncludeDurableHistory() async throws {
         let transport = AgentThreadMockTransport()
         let client = makeClient(transport: transport)
@@ -110,6 +143,10 @@ final class CodexAgentThreadTests: XCTestCase {
         let turnParameters = try parametersObject(
             transport.lastParameters(for: "turn/start")
         )
+        let readParameters = try parametersObject(
+            transport.lastParameters(for: "thread/read")
+        )
+        XCTAssertEqual(readParameters["includeTurns"], .boolean(false))
         XCTAssertEqual(turnParameters["cwd"], .string(workspace.path))
         XCTAssertEqual(turnParameters["approvalPolicy"], .string("on-request"))
         XCTAssertEqual(turnParameters["approvalsReviewer"], .string("user"))

@@ -67,6 +67,13 @@ struct NavigationBubbleSizePreferenceKey: PreferenceKey {
     }
 }
 
+struct AgentAttentionBubbleSizePreferenceKey: PreferenceKey {
+    static var defaultValue: CGSize = .zero
+    static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
+        value = nextValue()
+    }
+}
+
 /// The buddy's behavioral mode. Controls whether it follows the cursor,
 /// is flying toward a detected UI element, or is pointing at an element.
 enum BuddyNavigationMode {
@@ -127,6 +134,7 @@ struct BlueCursorView: View {
     @State private var navigationBubbleText: String = ""
     @State private var navigationBubbleOpacity: Double = 0.0
     @State private var navigationBubbleSize: CGSize = .zero
+    @State private var agentAttentionBubbleSize: CGSize = .zero
 
     /// The cursor position at the moment navigation started, used to detect
     /// if the user moves the cursor enough to cancel the navigation.
@@ -180,6 +188,79 @@ struct BlueCursorView: View {
                     .max() ?? 0,
                 sceneGeneration: companionManager.spatialAnnotationSceneGeneration
             )
+
+            if let spatialInteractionPresentation =
+                companionManager.activeSpatialInteractionPresentation,
+               spatialInteractionPresentation.step.displayIdentifier
+                    == displayIdentifier,
+               spatialInteractionPresentation.capturedDisplayFrame
+                    == screenFrame {
+                SpatialInteractionStepOverlayView(
+                    presentation: spatialInteractionPresentation
+                )
+            }
+
+            SpatialCursorTraceOverlayView(
+                samples: companionManager.spatialCursorTraceSamples,
+                displayIdentifier: displayIdentifier,
+                globalDisplayFrame: CGDisplayBounds(displayIdentifier),
+                displaySize: screenFrame.size
+            )
+
+            if isCursorOnThisScreen,
+               let agentAttentionMessage = companionManager.agentAttentionMessage {
+                Text(agentAttentionMessage)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white)
+                    .multilineTextAlignment(.leading)
+                    .lineLimit(4)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .frame(maxWidth: 320, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color.black.opacity(0.94))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .stroke(DS.Colors.warning.opacity(0.8), lineWidth: 1)
+                            }
+                            .shadow(color: DS.Colors.warning.opacity(0.35), radius: 12)
+                    )
+                    .fixedSize(horizontal: false, vertical: true)
+                    .overlay(
+                        GeometryReader { geometry in
+                            Color.clear.preference(
+                                key: AgentAttentionBubbleSizePreferenceKey.self,
+                                value: geometry.size
+                            )
+                        }
+                    )
+                    .position(
+                        x: min(
+                            max(
+                                cursorPosition.x + 24 + agentAttentionBubbleSize.width / 2,
+                                agentAttentionBubbleSize.width / 2 + 12
+                            ),
+                            screenFrame.width - agentAttentionBubbleSize.width / 2 - 12
+                        ),
+                        y: min(
+                            max(
+                                cursorPosition.y + 28 + agentAttentionBubbleSize.height / 2,
+                                agentAttentionBubbleSize.height / 2 + 12
+                            ),
+                            screenFrame.height - agentAttentionBubbleSize.height / 2 - 12
+                        )
+                    )
+                    .animation(
+                        .spring(response: 0.24, dampingFraction: 0.72),
+                        value: cursorPosition
+                    )
+                    .onPreferenceChange(
+                        AgentAttentionBubbleSizePreferenceKey.self
+                    ) { newSize in
+                        agentAttentionBubbleSize = newSize
+                    }
+            }
 
             // Welcome speech bubble (first launch only)
             if isCursorOnThisScreen && showWelcome && !welcomeText.isEmpty {
@@ -838,6 +919,7 @@ class OverlayWindowManager {
         presentationGeneration &+= 1
         activeCompanionManager?.clearDetectedElementLocation()
         activeCompanionManager?.clearSpatialAnnotations()
+        activeCompanionManager?.clearSpatialInteractionWalkthrough()
         for window in overlayWindows {
             window.orderOut(nil)
             window.contentView = nil
@@ -872,6 +954,7 @@ class OverlayWindowManager {
                 }
                 self.activeCompanionManager?.clearDetectedElementLocation()
                 self.activeCompanionManager?.clearSpatialAnnotations()
+                self.activeCompanionManager?.clearSpatialInteractionWalkthrough()
                 self.overlayWindows.removeAll()
             }
         })

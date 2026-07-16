@@ -31,6 +31,7 @@ final class AgentPresentationModel: ObservableObject {
     @Published private(set) var isAuthenticating = false
     @Published private(set) var authenticationCanStartAgain = false
     @Published private(set) var tokenLayoutRevision = 0
+    @Published private(set) var agentAttentionRequest: CodexAgentAttentionRequest?
     @Published var route: AgentHUDRoute = .overview
     @Published var isNotchExpanded = false
     @Published var newTaskPrompt = ""
@@ -89,6 +90,18 @@ final class AgentPresentationModel: ObservableObject {
     }
 
     var spokenAgentConversationContext: SpokenAgentConversationContext {
+        if selectedTask?.pendingUserInputs.isEmpty == false {
+            return .waitingForInput
+        }
+        let tasksWaitingForInput = runningTasks.filter {
+            !$0.pendingUserInputs.isEmpty
+        }
+        if tasksWaitingForInput.count == 1 {
+            return .waitingForInput
+        }
+        if tasksWaitingForInput.count > 1 {
+            return .ambiguous
+        }
         if selectedTask != nil { return .selected }
         if runningTasks.count == 1 { return .soleRunning }
         if runningTasks.count > 1 { return .ambiguous }
@@ -507,32 +520,56 @@ final class AgentPresentationModel: ObservableObject {
         let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedPrompt.isEmpty else { return }
 
-        let followUpTargetResolution = SpokenAgentFollowUpTargetResolver.resolve(
-            selectedThreadID: selectedTask?.threadID,
-            runningThreadIDs: runningTasks.map(\.threadID)
-        )
         let targetTask: CodexAgentTaskSnapshot
-        switch followUpTargetResolution {
-        case .target(let threadID):
-            guard let resolvedTargetTask = taskSnapshots.first(
-                where: { $0.threadID == threadID }
-            ) else {
+        let tasksWaitingForInput = runningTasks.filter {
+            !$0.pendingUserInputs.isEmpty
+        }
+        if let selectedTask,
+           !selectedTask.pendingUserInputs.isEmpty {
+            targetTask = selectedTask
+        } else if tasksWaitingForInput.count == 1,
+                  let waitingTask = tasksWaitingForInput.first {
+            targetTask = waitingTask
+        } else {
+            let followUpTargetResolution = SpokenAgentFollowUpTargetResolver.resolve(
+                selectedThreadID: selectedTask?.threadID,
+                runningThreadIDs: runningTasks.map(\.threadID)
+            )
+            switch followUpTargetResolution {
+            case .target(let threadID):
+                guard let resolvedTargetTask = taskSnapshots.first(
+                    where: { $0.threadID == threadID }
+                ) else {
+                    showOverview()
+                    operationErrorMessage = "That agent is no longer available."
+                    return
+                }
+                targetTask = resolvedTargetTask
+            case .requiresSelection:
                 showOverview()
-                operationErrorMessage = "That agent is no longer available."
+                operationErrorMessage = "Open the agent you want to continue, then repeat the instruction."
+                return
+            case .missing:
+                showOverview()
+                operationErrorMessage = "Open a recent agent before giving it a follow-up."
                 return
             }
-            targetTask = resolvedTargetTask
-        case .requiresSelection:
-            showOverview()
-            operationErrorMessage = "Open the agent you want to continue, then repeat the instruction."
-            return
-        case .missing:
-            showOverview()
-            operationErrorMessage = "Open a recent agent before giving it a follow-up."
-            return
         }
 
         showTask(threadID: targetTask.threadID)
+        if let userInputRequest = targetTask.pendingUserInputs.first {
+            guard userInputRequest.questions.count == 1,
+                  let question = userInputRequest.questions.first else {
+                operationErrorMessage = "This agent needs several answers. Use the open agent card to continue."
+                return
+            }
+            resolveUserInput(
+                userInputRequest,
+                answersByQuestionID: [question.id: trimmedPrompt]
+            )
+            return
+        }
+
         beginFollowUp(
             prompt: trimmedPrompt,
             on: targetTask,
@@ -888,11 +925,22 @@ final class AgentPresentationModel: ObservableObject {
         }
         guard let workspacePath else {
             taskSnapshots = []
+            agentAttentionRequest = nil
             return
         }
-        taskSnapshots = snapshots.filter { snapshot in
+        let workspaceSnapshots = snapshots.filter { snapshot in
             snapshot.workspacePath == workspacePath
         }
+        taskSnapshots = workspaceSnapshots
+
+        let nextAttentionRequest = workspaceSnapshots.lazy
+            .compactMap(\.pendingAttentionRequest)
+            .first
+        if nextAttentionRequest != agentAttentionRequest {
+            agentAttentionRequest = nextAttentionRequest
+            didChangeTokenLayout = true
+        }
+
         if didChangeTokenLayout {
             tokenLayoutRevision &+= 1
         }

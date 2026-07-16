@@ -40,6 +40,7 @@ struct CodexAgentWorkspace: Equatable, Sendable {
 
 enum CodexApprovalPolicy: String, Codable, Equatable, Sendable {
     case onRequest = "on-request"
+    case never
 }
 
 enum CodexApprovalsReviewer: String, Codable, Equatable, Sendable {
@@ -47,7 +48,35 @@ enum CodexApprovalsReviewer: String, Codable, Equatable, Sendable {
 }
 
 enum CodexSandboxMode: String, Codable, Equatable, Sendable {
+    case readOnly = "read-only"
     case workspaceWrite = "workspace-write"
+}
+
+struct CodexModelListParameters: Encodable, Equatable, Sendable {
+    let cursor: String?
+    let includeHidden: Bool?
+    let limit: Int?
+
+    init(
+        cursor: String? = nil,
+        includeHidden: Bool? = false,
+        limit: Int? = nil
+    ) {
+        self.cursor = cursor
+        self.includeHidden = includeHidden
+        self.limit = limit
+    }
+}
+
+struct CodexModel: Codable, Equatable, Sendable {
+    let id: String
+    let model: String
+    let isDefault: Bool
+}
+
+struct CodexModelListResponse: Codable, Equatable, Sendable {
+    let data: [CodexModel]
+    let nextCursor: String?
 }
 
 struct CodexThreadStartParameters: Encodable, Equatable, Sendable {
@@ -191,6 +220,25 @@ struct CodexTextUserInput: Encodable, Equatable, Sendable {
     let text: String
 }
 
+struct CodexLocalImageUserInput: Encodable, Equatable, Sendable {
+    let type = "localImage"
+    let path: String
+}
+
+enum CodexUserInput: Encodable, Equatable, Sendable {
+    case text(CodexTextUserInput)
+    case localImage(CodexLocalImageUserInput)
+
+    func encode(to encoder: Encoder) throws {
+        switch self {
+        case .text(let textInput):
+            try textInput.encode(to: encoder)
+        case .localImage(let localImageInput):
+            try localImageInput.encode(to: encoder)
+        }
+    }
+}
+
 struct CodexWorkspaceWriteSandboxPolicy: Encodable, Equatable, Sendable {
     let type = "workspaceWrite"
     let writableRoots: [String]
@@ -203,13 +251,32 @@ struct CodexWorkspaceWriteSandboxPolicy: Encodable, Equatable, Sendable {
     let excludeTmpdirEnvVar = true
 }
 
+struct CodexReadOnlySandboxPolicy: Encodable, Equatable, Sendable {
+    let type = "readOnly"
+    let networkAccess = false
+}
+
+enum CodexTurnSandboxPolicy: Encodable, Equatable, Sendable {
+    case readOnly(CodexReadOnlySandboxPolicy)
+    case workspaceWrite(CodexWorkspaceWriteSandboxPolicy)
+
+    func encode(to encoder: Encoder) throws {
+        switch self {
+        case .readOnly(let readOnlyPolicy):
+            try readOnlyPolicy.encode(to: encoder)
+        case .workspaceWrite(let workspaceWritePolicy):
+            try workspaceWritePolicy.encode(to: encoder)
+        }
+    }
+}
+
 struct CodexTurnStartParameters: Encodable, Equatable, Sendable {
     let threadId: String
-    let input: [CodexTextUserInput]
+    let input: [CodexUserInput]
     let cwd: String
     let approvalPolicy: CodexApprovalPolicy
     let approvalsReviewer: CodexApprovalsReviewer
-    let sandboxPolicy: CodexWorkspaceWriteSandboxPolicy
+    let sandboxPolicy: CodexTurnSandboxPolicy
     let model: String?
     let effort: String?
     let clientUserMessageId: String?

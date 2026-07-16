@@ -12,6 +12,14 @@ final class SpokenIntentRouterTests: XCTestCase {
             .agent(prompt: "run the tests")
         )
         XCTAssertEqual(
+            SpokenIntentRouter.route("Agent. Run the tests"),
+            .agent(prompt: "Run the tests")
+        )
+        XCTAssertEqual(
+            SpokenIntentRouter.route("agent run the tests"),
+            .agent(prompt: "run the tests")
+        )
+        XCTAssertEqual(
             SpokenIntentRouter.route("Hey Clicky agent inspect the parser"),
             .agent(prompt: "inspect the parser")
         )
@@ -57,6 +65,14 @@ final class SpokenIntentRouterTests: XCTestCase {
         )
         XCTAssertEqual(
             SpokenIntentRouter.route("Hey Clicky, agent-based reasoning is neat"),
+            .companion
+        )
+        XCTAssertEqual(
+            SpokenIntentRouter.route("Agent's not working"),
+            .companion
+        )
+        XCTAssertEqual(
+            SpokenIntentRouter.route("Agent-based reasoning is neat"),
             .companion
         )
     }
@@ -174,6 +190,17 @@ final class SpokenIntentRouterTests: XCTestCase {
                 agentConversationContext: .selected
             ),
             .agentFollowUp(prompt: "Can you change the heading to blue?")
+        )
+    }
+
+    func testWaitingAgentTreatsShortSpokenAnswerAsStructuredFollowUp() {
+        XCTAssertEqual(
+            SpokenIntentRouter.route(
+                "Alpha",
+                hasScreenAwareDestination: true,
+                agentConversationContext: .waitingForInput
+            ),
+            .agentFollowUp(prompt: "Alpha")
         )
     }
 

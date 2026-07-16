@@ -112,19 +112,24 @@ extension CodexAppServerClient {
         let normalizedPrompt = try normalizedPrompt(prompt)
         _ = try await readThread(
             threadID: threadID,
-            in: workspace
+            in: workspace,
+            includeTurns: false
         )
 
         return try await sendRequest(
             method: "turn/start",
             parameters: CodexTurnStartParameters(
                 threadId: threadID,
-                input: [CodexTextUserInput(text: normalizedPrompt)],
+                input: [
+                    .text(CodexTextUserInput(text: normalizedPrompt))
+                ],
                 cwd: workspace.path,
                 approvalPolicy: .onRequest,
                 approvalsReviewer: .user,
-                sandboxPolicy: CodexWorkspaceWriteSandboxPolicy(
-                    writableRoots: [workspace.path]
+                sandboxPolicy: .workspaceWrite(
+                    CodexWorkspaceWriteSandboxPolicy(
+                        writableRoots: [workspace.path]
+                    )
                 ),
                 model: normalizedOptionalValue(model),
                 effort: normalizedOptionalValue(reasoningEffort),
