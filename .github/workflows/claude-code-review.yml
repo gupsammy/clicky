@@ -105,9 +105,12 @@ jobs:
             feedback.
 
             How to deliver the summary:
-            - Manual dispatch run: write the complete review markdown to a file named
-              review-output.md in the repository root using the Write tool. A workflow
-              step posts it to the PR after you finish — do NOT try to post it yourself.
+            - Manual dispatch run: you MUST create the file review-output.md (exactly
+              that name, at the repository root) containing the complete review
+              markdown, using the Write tool — NOT a Bash redirect, NOT any other path.
+              Do this even if you found zero issues. This is the only delivery channel:
+              if the file does not exist when you finish, the entire review is lost and
+              the run fails. Do NOT try to post the review yourself.
             - pull_request-triggered run: post it as a top-level PR comment as usual.
           claude_args: |
             --model sonnet
@@ -121,8 +124,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ -f review-output.md ]; then
-            gh pr comment ${{ inputs.pr_number }} --body-file review-output.md
+          # Tolerate the file landing in a subdirectory despite instructions
+          review_file=$(find . -maxdepth 3 -name review-output.md -not -path './.git/*' | head -1)
+          if [ -n "$review_file" ]; then
+            gh pr comment ${{ inputs.pr_number }} --body-file "$review_file"
           else
             echo "::error::Claude finished without writing review-output.md — review was not posted"
             exit 1
