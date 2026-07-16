@@ -90,9 +90,10 @@ private final class AppleSpeechTranscriptionSession: NSObject, BuddyStreamingTra
         recognitionRequest.addsPunctuation = true
         recognitionRequest.contextualStrings = keyterms
 
-        if speechRecognizer.supportsOnDeviceRecognition {
-            recognitionRequest.requiresOnDeviceRecognition = true
-        }
+        // `supportsOnDeviceRecognition` does not guarantee the language asset is
+        // installed and ready. Let Speech fall back to its service instead of
+        // failing the entire no-key provider when the local asset is unavailable.
+        recognitionRequest.requiresOnDeviceRecognition = false
 
         recognitionTask = speechRecognizer.recognitionTask(with: recognitionRequest) { [weak self] result, error in
             self?.handleRecognitionEvent(result: result, error: error)
@@ -100,7 +101,7 @@ private final class AppleSpeechTranscriptionSession: NSObject, BuddyStreamingTra
     }
 
     func appendAudioBuffer(_ audioBuffer: AVAudioPCMBuffer) {
-        guard !hasRequestedFinalTranscript else { return }
+        guard !hasRequestedFinalTranscript, audioBuffer.frameLength > 0 else { return }
         recognitionRequest.append(audioBuffer)
     }
 
@@ -134,6 +135,11 @@ private final class AppleSpeechTranscriptionSession: NSObject, BuddyStreamingTra
         if hasRequestedFinalTranscript && !latestRecognizedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             deliverFinalTranscriptIfNeeded(latestRecognizedText)
         } else {
+            let speechRecognitionError = error as NSError
+            print(
+                "❌ Apple Speech recognition failed "
+                    + "(\(speechRecognitionError.domain):\(speechRecognitionError.code))"
+            )
             onError(error)
         }
     }
