@@ -28,6 +28,18 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 1
+          # On manual dispatch, review against the PR's actual tree, not main
+          ref: ${{ inputs.pr_number && format('refs/pull/{0}/head', inputs.pr_number) || github.ref }}
+
+      # Large PR diffs overflow Claude's Bash output limit and strand the review
+      # in denied workarounds — hand it the diff as a file it can Read in chunks
+      - name: Materialize PR diff (manual dispatch only)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr diff ${{ inputs.pr_number }} > pr-review-diff.patch
+          wc -l pr-review-diff.patch
 
       - name: Install Claude Code
         run: mkdir -p ~/.local/bin && npm install -g @anthropic-ai/claude-code
@@ -50,9 +62,16 @@ jobs:
             Read CLAUDE.md for the architecture and conventions: this is a menu-bar-only
             macOS app (SwiftUI + AppKit bridging, MVVM, @MainActor isolation) where all
             external API calls are proxied through a Cloudflare Worker (worker/src/index.ts)
-            that holds the secrets. Run `gh pr diff` to get the full diff, then categorize
-            changed files: Swift app sources, Cloudflare Worker, Xcode project config
-            (project.pbxproj, Info.plist), docs, CI.
+            that holds the secrets. Get the full diff, then categorize changed files:
+            Swift app sources, Cloudflare Worker, Xcode project config (project.pbxproj,
+            Info.plist), docs, CI.
+
+            Where to get the diff and code:
+            - Manual dispatch run: the checkout IS the PR head, and the complete diff is
+              already at pr-review-diff.patch in the repository root — Read it (in
+              chunks if large). Do NOT run gh pr diff, git fetch, or redirect output to
+              files; those are unavailable. Read source files directly from the checkout.
+            - pull_request-triggered run: run `gh pr diff` as usual.
 
             ## Phase 2 — Change Comprehension
             Summarize the PR's intent in one sentence. Read the surrounding code, not just
