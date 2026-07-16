@@ -97,6 +97,11 @@ struct CodexAgentItemCompletedNotification: Codable, Equatable, Sendable {
     let completedAtMs: Int64
 }
 
+struct CodexAgentServerRequestResolvedNotification: Codable, Equatable, Sendable {
+    let requestId: CodexAppServerRequestID
+    let threadId: String
+}
+
 struct CodexAgentThreadStatusChangedNotification: Codable, Equatable, Sendable {
     let threadId: String
     let status: CodexThreadStatus

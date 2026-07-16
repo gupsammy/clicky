@@ -55,6 +55,7 @@ actor CodexAgentTaskStore {
 
     private let snapshotContinuation: AsyncStream<[CodexAgentTaskSnapshot]>.Continuation
     private var taskStatesByThreadID: [String: MutableTaskState] = [:]
+    private var resolvedServerRequestIDs: Set<CodexAppServerRequestID> = []
     private var nextEventSequence: Int64 = 1
     private var notificationMonitoringTask: Task<Void, Never>?
     private var serverRequestMonitoringTask: Task<Void, Never>?
@@ -127,13 +128,16 @@ actor CodexAgentTaskStore {
             applyItemCompleted(notification)
         case "thread/status/changed":
             applyThreadStatusChanged(notification)
+        case "serverRequest/resolved":
+            applyServerRequestResolved(notification)
         default:
             return
         }
     }
 
     func apply(serverRequest: CodexAppServerRequest) {
-        guard Self.approvalRequestMethods.contains(serverRequest.method),
+        guard !resolvedServerRequestIDs.contains(serverRequest.id),
+              Self.approvalRequestMethods.contains(serverRequest.method),
               let parameters = serverRequest.params?.objectValue,
               let threadID = parameters["threadId"]?.stringValue,
               let turnID = parameters["turnId"]?.stringValue,
@@ -184,6 +188,7 @@ actor CodexAgentTaskStore {
     }
 
     func resolveApproval(requestID: CodexAppServerRequestID) {
+        resolvedServerRequestIDs.insert(requestID)
         guard let threadID = taskStatesByThreadID.first(where: { _, taskState in
             taskState.approvalsByRequestID[requestID] != nil
         })?.key,
@@ -199,6 +204,35 @@ actor CodexAgentTaskStore {
         }
         taskState.lastEventSequence = takeNextEventSequence()
         taskStatesByThreadID[threadID] = taskState
+        publishSnapshots()
+    }
+
+    private func applyServerRequestResolved(
+        _ notification: CodexAppServerNotification
+    ) {
+        guard let parameters = try? notification.decodeParameters(
+            as: CodexAgentServerRequestResolvedNotification.self
+        ) else {
+            return
+        }
+
+        resolvedServerRequestIDs.insert(parameters.requestId)
+        guard var taskState = taskStatesByThreadID[parameters.threadId],
+              taskState.approvalsByRequestID.removeValue(
+                forKey: parameters.requestId
+              ) != nil else {
+            return
+        }
+
+        taskState.approvalOrder.removeAll {
+            $0 == parameters.requestId
+        }
+        if taskState.status == .waitingForApproval,
+           taskState.approvalOrder.isEmpty {
+            taskState.status = .running
+        }
+        taskState.lastEventSequence = takeNextEventSequence()
+        taskStatesByThreadID[parameters.threadId] = taskState
         publishSnapshots()
     }
 

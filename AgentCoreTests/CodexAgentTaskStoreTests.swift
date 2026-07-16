@@ -135,6 +135,43 @@ final class CodexAgentTaskStoreTests: XCTestCase {
         XCTAssertTrue(snapshot.pendingApprovals.isEmpty)
     }
 
+    func testServerResolutionClearsAndTombstonesTheApprovalRequest() async throws {
+        let store = CodexAgentTaskStore()
+        let thread = makeThread(id: "thread_resolved", preview: "Resolved")
+        await store.register(thread: thread)
+        let approvalRequest = CodexAppServerRequest(
+            id: .string("approval_resolved"),
+            method: "item/commandExecution/requestApproval",
+            params: .object([
+                "threadId": .string(thread.id),
+                "turnId": .string("turn_resolved"),
+                "itemId": .string("command_resolved"),
+                "command": .string("swift test")
+            ])
+        )
+
+        await store.apply(serverRequest: approvalRequest)
+        await store.apply(
+            notification: try notification(
+                method: "serverRequest/resolved",
+                parameters: CodexAgentServerRequestResolvedNotification(
+                    requestId: approvalRequest.id,
+                    threadId: thread.id
+                )
+            )
+        )
+
+        var currentSnapshots = await store.currentSnapshots()
+        var snapshot = try XCTUnwrap(currentSnapshots.first)
+        XCTAssertEqual(snapshot.status, .running)
+        XCTAssertTrue(snapshot.pendingApprovals.isEmpty)
+
+        await store.apply(serverRequest: approvalRequest)
+        currentSnapshots = await store.currentSnapshots()
+        snapshot = try XCTUnwrap(currentSnapshots.first)
+        XCTAssertTrue(snapshot.pendingApprovals.isEmpty)
+    }
+
     func testThreadStatusTracksWaitingForInput() async throws {
         let store = CodexAgentTaskStore()
         let thread = makeThread(id: "thread_1", preview: "Waiting task")
