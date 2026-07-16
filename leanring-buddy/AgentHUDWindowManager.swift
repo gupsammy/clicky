@@ -22,6 +22,7 @@ final class AgentHUDWindowManager {
     private var tokenPanelsByDisplayIdentifier: [CGDirectDisplayID: AgentHUDPanel] = [:]
     private var modelObservation: AnyCancellable?
     private var screenChangeObserver: NSObjectProtocol?
+    private var activeSpaceChangeObserver: NSObjectProtocol?
     private var outsideClickMonitor: Any?
 
     init(presentationModel: AgentPresentationModel) {
@@ -47,6 +48,16 @@ final class AgentHUDWindowManager {
                 self?.rebuildAllWindows()
             }
         }
+
+        activeSpaceChangeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.rehomePanelsThatAreNotOnActiveSpace()
+            }
+        }
     }
 
     deinit {
@@ -56,6 +67,11 @@ final class AgentHUDWindowManager {
         // hide() before releasing it so no orphaned panels stay on screen.
         if let screenChangeObserver {
             NotificationCenter.default.removeObserver(screenChangeObserver)
+        }
+        if let activeSpaceChangeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(
+                activeSpaceChangeObserver
+            )
         }
         if let outsideClickMonitor {
             NSEvent.removeMonitor(outsideClickMonitor)
@@ -83,6 +99,18 @@ final class AgentHUDWindowManager {
     private func rebuildAllWindows() {
         hide()
         show()
+    }
+
+    private func rehomePanelsThatAreNotOnActiveSpace() {
+        let allPanels = [notchPanel].compactMap { $0 }
+            + Array(tokenPanelsByDisplayIdentifier.values)
+        let stalePanels = allPanels.filter { !$0.isOnActiveSpace }
+        guard !stalePanels.isEmpty else { return }
+
+        for stalePanel in stalePanels {
+            stalePanel.orderOut(nil)
+        }
+        refreshWindowLayout()
     }
 
     private func createNotchPanelIfNeeded() {
