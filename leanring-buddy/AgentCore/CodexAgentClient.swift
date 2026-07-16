@@ -112,7 +112,8 @@ extension CodexAppServerClient {
         let normalizedPrompt = try normalizedPrompt(prompt)
         _ = try await readThread(
             threadID: threadID,
-            in: workspace
+            in: workspace,
+            includeTurns: false
         )
 
         return try await sendRequest(

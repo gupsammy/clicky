@@ -143,6 +143,10 @@ final class CodexAgentThreadTests: XCTestCase {
         let turnParameters = try parametersObject(
             transport.lastParameters(for: "turn/start")
         )
+        let readParameters = try parametersObject(
+            transport.lastParameters(for: "thread/read")
+        )
+        XCTAssertEqual(readParameters["includeTurns"], .boolean(false))
         XCTAssertEqual(turnParameters["cwd"], .string(workspace.path))
         XCTAssertEqual(turnParameters["approvalPolicy"], .string("on-request"))
         XCTAssertEqual(turnParameters["approvalsReviewer"], .string("user"))
