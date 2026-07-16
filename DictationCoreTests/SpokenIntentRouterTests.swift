@@ -228,6 +228,12 @@ final class SpokenIntentRouterTests: XCTestCase {
             ),
             .companion
         )
+        XCTAssertEqual(
+            SpokenIntentRouter.route(
+                "Can you show me how to build a website and create an app?"
+            ),
+            .companion
+        )
     }
 
     func testHighConfidenceNewWorkOutranksAmbiguousFollowUpContext() {

@@ -369,6 +369,8 @@ public enum SpokenIntentRouter {
         return questionPrefixes.contains(where: normalizedTranscript.hasPrefix)
             || normalizedTranscript.contains("explain how ")
             || normalizedTranscript.contains("explain why ")
+            || normalizedTranscript.contains("show me how ")
+            || normalizedTranscript.contains("show me why ")
             || normalizedTranscript.contains("tell me how ")
             || normalizedTranscript.contains("tell me why ")
     }
