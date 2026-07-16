@@ -32,8 +32,9 @@ public enum SpokenIntentRouter {
                 trimmedTranscript.startIndex,
                 offsetBy: "agent:".count
             )
-            let prompt = trimmedTranscript[promptStartIndex...]
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let prompt = promptAfterRemovingLeadingTriggerSeparators(
+                from: trimmedTranscript[promptStartIndex...]
+            )
             guard !prompt.isEmpty else { return .invalidAgentTrigger }
             return .agent(prompt: prompt)
         }
@@ -50,8 +51,21 @@ public enum SpokenIntentRouter {
         .whitespacesAndNewlines
         .union(.punctuationCharacters)
 
+    // The boundary AFTER the trigger word must be whitespace or an explicit
+    // phrase separator — never the full punctuation set, because that set
+    // includes word-internal characters like apostrophes and hyphens, and
+    // ordinary words such as "agent's" or "agent-based" would misroute the
+    // whole sentence into the agent lane with a mangled prompt.
+    private static let promptSeparatorCharacters = CharacterSet
+        .whitespacesAndNewlines
+        .union(CharacterSet(charactersIn: ",:;.?!"))
+
     private static func isTriggerBoundary(_ character: Character) -> Bool {
         String(character).rangeOfCharacter(from: triggerBoundaryCharacters) != nil
+    }
+
+    private static func isPromptSeparator(_ character: Character) -> Bool {
+        String(character).rangeOfCharacter(from: promptSeparatorCharacters) != nil
     }
 
     private static func promptAfterWakePhrase(
@@ -86,7 +100,7 @@ public enum SpokenIntentRouter {
 
         let remainingTranscript = transcript[currentIndex...]
         guard remainingTranscript.isEmpty
-                || remainingTranscript.first.map(isTriggerBoundary) == true else {
+                || remainingTranscript.first.map(isPromptSeparator) == true else {
             return nil
         }
         return promptAfterRemovingLeadingTriggerSeparators(from: remainingTranscript)
@@ -96,7 +110,7 @@ public enum SpokenIntentRouter {
         from remainingTranscript: Substring
     ) -> String {
         guard let promptStartIndex = remainingTranscript.firstIndex(
-            where: { !isTriggerBoundary($0) }
+            where: { !isPromptSeparator($0) }
         ) else {
             return ""
         }

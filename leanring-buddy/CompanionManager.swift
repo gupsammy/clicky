@@ -626,8 +626,10 @@ final class CompanionManager: ObservableObject {
                         )
                         switch spokenRequestRoute {
                         case .agent(let agentPrompt):
+                            ClickyAnalytics.trackSpokenAgentTaskRouted(prompt: agentPrompt)
                             self.routeSpokenRequestToAgent(prompt: agentPrompt)
                         case .invalidAgentTrigger:
+                            ClickyAnalytics.trackSpokenAgentTriggerInvalid()
                             self.reportSpokenRoutingFailure(
                                 "Say what the agent should do after 'agent'."
                             )

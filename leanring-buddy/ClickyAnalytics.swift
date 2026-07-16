@@ -136,6 +136,18 @@ enum ClickyAnalytics {
         PostHogSDK.shared.capture("screen_aware_dictation_failed")
     }
 
+    /// A spoken "agent" trigger routed the transcript to the Codex agent.
+    static func trackSpokenAgentTaskRouted(prompt: String) {
+        PostHogSDK.shared.capture("spoken_agent_task_routed", properties: [
+            "character_count": prompt.count
+        ])
+    }
+
+    /// A spoken "agent" trigger was recognized but carried no usable prompt.
+    static func trackSpokenAgentTriggerInvalid() {
+        PostHogSDK.shared.capture("spoken_agent_trigger_invalid")
+    }
+
     /// Transcription completed and the user's message is being sent to the AI.
     static func trackUserMessageSent(transcript: String) {
         PostHogSDK.shared.capture("user_message_sent", properties: [

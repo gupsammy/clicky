@@ -50,6 +50,35 @@ final class SpokenIntentRouterTests: XCTestCase {
         )
     }
 
+    func testWordInternalPunctuationAfterTriggerWordStaysInCompanionLane() {
+        XCTAssertEqual(
+            SpokenIntentRouter.route("Hey Clicky, agent's not working"),
+            .companion
+        )
+        XCTAssertEqual(
+            SpokenIntentRouter.route("Hey Clicky, agent-based reasoning is neat"),
+            .companion
+        )
+    }
+
+    func testPhraseSeparatorAfterTriggerWordStillRoutesToAgent() {
+        XCTAssertEqual(
+            SpokenIntentRouter.route("Hey Clicky, agent, open the readme"),
+            .agent(prompt: "open the readme")
+        )
+        XCTAssertEqual(
+            SpokenIntentRouter.route("Hey Clicky, agent."),
+            .invalidAgentTrigger
+        )
+    }
+
+    func testBareAgentPrefixTrimsLeadingSeparatorsLikeTheWakePhrasePath() {
+        XCTAssertEqual(
+            SpokenIntentRouter.route("agent: , clean up the code"),
+            .agent(prompt: "clean up the code")
+        )
+    }
+
     func testFocusedDestinationUsesScreenAwareComposition() {
         XCTAssertEqual(
             SpokenIntentRouter.route(
