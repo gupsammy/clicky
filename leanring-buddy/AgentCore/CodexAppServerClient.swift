@@ -154,9 +154,10 @@ actor CodexAppServerClient {
                 account: accountResponse
             )
         } catch {
-            if activeTransportGeneration == transportGeneration {
-                activeTransportGeneration = nil
+            guard activeTransportGeneration == transportGeneration else {
+                throw error
             }
+            activeTransportGeneration = nil
             failPendingRequests(with: error)
             transport.stop()
             connectionState = .disconnected

@@ -271,6 +271,48 @@ final class CodexAppServerCoreTests: XCTestCase {
         await client.stop()
     }
 
+    func testSupersededConnectFailureCannotStopANewerConnection() async throws {
+        let transport = MockCodexAppServerTransport(holdFirstInitializeResponse: true)
+        let client = makeClient(transport: transport)
+        let reconnectResultStreamPair = AsyncStream<Bool>.makeStream(
+            bufferingPolicy: .bufferingNewest(1)
+        )
+
+        transport.setNextStopHandler {
+            Task(priority: .high) {
+                do {
+                    _ = try await client.connect()
+                    reconnectResultStreamPair.continuation.yield(true)
+                } catch {
+                    reconnectResultStreamPair.continuation.yield(false)
+                }
+            }
+        }
+
+        let supersededConnectionTask = Task(priority: .background) {
+            try? await client.connect()
+        }
+
+        let initializeRequestDeadline = Date().addingTimeInterval(2)
+        while transport.initializeRequestCount < 1,
+              Date() < initializeRequestDeadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        guard transport.initializeRequestCount == 1 else {
+            await client.stop()
+            return XCTFail("The first connection did not reach its suspended handshake")
+        }
+
+        await client.stop()
+        let reconnectSucceeded = try await firstValue(from: reconnectResultStreamPair.stream)
+        XCTAssertTrue(reconnectSucceeded)
+        _ = await supersededConnectionTask.value
+
+        let connectionState = await client.connectionState
+        XCTAssertEqual(connectionState, .connected)
+        await client.stop()
+    }
+
     private func makeClient(
         transport: MockCodexAppServerTransport,
         requestTimeoutNanoseconds: UInt64 = 15_000_000_000
@@ -313,6 +355,31 @@ final class CodexAppServerCoreTests: XCTestCase {
             return collectedNotifications
         }
     }
+
+    private func firstValue<Element: Sendable>(
+        from stream: AsyncStream<Element>,
+        timeoutNanoseconds: UInt64 = 2_000_000_000
+    ) async throws -> Element {
+        try await withThrowingTaskGroup(of: Element.self) { taskGroup in
+            taskGroup.addTask {
+                var iterator = stream.makeAsyncIterator()
+                guard let value = await iterator.next() else {
+                    throw NotificationCollectionTimeoutError()
+                }
+                return value
+            }
+            taskGroup.addTask {
+                try await Task.sleep(nanoseconds: timeoutNanoseconds)
+                throw NotificationCollectionTimeoutError()
+            }
+
+            defer { taskGroup.cancelAll() }
+            guard let value = try await taskGroup.next() else {
+                throw NotificationCollectionTimeoutError()
+            }
+            return value
+        }
+    }
 }
 
 private struct NotificationCollectionTimeoutError: Error {}
@@ -348,20 +415,32 @@ private final class MockCodexAppServerTransport: CodexAppServerTransport, @unche
     private let stateLock = NSLock()
     private let accountReadError: Bool
     private let ignoreAllRequests: Bool
+    private let holdFirstInitializeResponse: Bool
     private var messageHandler: (@Sendable (Data) -> Void)?
     private var terminationHandler: (@Sendable (CodexAppServerError) -> Void)?
     private var previousTerminationHandler: (@Sendable (CodexAppServerError) -> Void)?
+    private var nextStopHandler: (@Sendable () -> Void)?
+    private var storedInitializeRequestCount = 0
 
     private(set) var sentMethods: [String] = []
     private(set) var sentResponseIDs: [CodexAppServerRequestID] = []
     private(set) var didStop = false
 
+    var initializeRequestCount: Int {
+        stateLock.lock()
+        let initializeRequestCount = storedInitializeRequestCount
+        stateLock.unlock()
+        return initializeRequestCount
+    }
+
     init(
         accountReadError: Bool = false,
-        ignoreAllRequests: Bool = false
+        ignoreAllRequests: Bool = false,
+        holdFirstInitializeResponse: Bool = false
     ) {
         self.accountReadError = accountReadError
         self.ignoreAllRequests = ignoreAllRequests
+        self.holdFirstInitializeResponse = holdFirstInitializeResponse
     }
 
     func start(
@@ -382,15 +461,21 @@ private final class MockCodexAppServerTransport: CodexAppServerTransport, @unche
         )
 
         stateLock.lock()
+        var shouldHoldInitializeResponse = false
         if let method = incomingMessage.method {
             sentMethods.append(method)
+            if method == "initialize" {
+                storedInitializeRequestCount += 1
+                shouldHoldInitializeResponse = holdFirstInitializeResponse
+                    && storedInitializeRequestCount == 1
+            }
         } else if let responseID = incomingMessage.id {
             sentResponseIDs.append(responseID)
         }
         let currentMessageHandler = messageHandler
         stateLock.unlock()
 
-        if ignoreAllRequests {
+        if ignoreAllRequests || shouldHoldInitializeResponse {
             return
         }
 
@@ -445,6 +530,15 @@ private final class MockCodexAppServerTransport: CodexAppServerTransport, @unche
         previousTerminationHandler = terminationHandler
         messageHandler = nil
         terminationHandler = nil
+        let nextStopHandler = nextStopHandler
+        self.nextStopHandler = nil
+        stateLock.unlock()
+        nextStopHandler?()
+    }
+
+    func setNextStopHandler(_ nextStopHandler: @escaping @Sendable () -> Void) {
+        stateLock.lock()
+        self.nextStopHandler = nextStopHandler
         stateLock.unlock()
     }
 
