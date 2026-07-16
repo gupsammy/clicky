@@ -195,8 +195,12 @@ struct CodexWorkspaceWriteSandboxPolicy: Encodable, Equatable, Sendable {
     let type = "workspaceWrite"
     let writableRoots: [String]
     let networkAccess = false
-    let excludeSlashTmp = false
-    let excludeTmpdirEnvVar = false
+    // Codex's workspace-write sandbox additionally treats /tmp and $TMPDIR as
+    // writable unless they are explicitly excluded. Excluding both keeps the
+    // effective writable set to exactly writableRoots (the selected Agent
+    // Folder), matching the safety guarantee documented in AGENTS.md.
+    let excludeSlashTmp = true
+    let excludeTmpdirEnvVar = true
 }
 
 struct CodexTurnStartParameters: Encodable, Equatable, Sendable {

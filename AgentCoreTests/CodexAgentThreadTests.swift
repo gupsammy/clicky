@@ -30,7 +30,8 @@ final class CodexAgentThreadTests: XCTestCase {
         )
         _ = try await client.resumeThread(
             threadID: startedThread.thread.id,
-            in: workspace
+            in: workspace,
+            model: "  gpt-5.4  "
         )
 
         let startParameters = try parametersObject(
@@ -54,6 +55,7 @@ final class CodexAgentThreadTests: XCTestCase {
         XCTAssertEqual(resumeParameters["cwd"], .string(workspace.path))
         XCTAssertEqual(resumeParameters["approvalPolicy"], .string("on-request"))
         XCTAssertEqual(resumeParameters["sandbox"], .string("workspace-write"))
+        XCTAssertEqual(resumeParameters["model"], .string("gpt-5.4"))
 
         await client.stop()
     }
@@ -66,7 +68,8 @@ final class CodexAgentThreadTests: XCTestCase {
 
         let listedThreads = try await client.listThreads(in: workspace)
         let readThread = try await client.readThread(
-            threadID: listedThreads.data[0].id
+            threadID: listedThreads.data[0].id,
+            in: workspace
         )
 
         XCTAssertEqual(listedThreads.data.count, 1)
@@ -122,6 +125,41 @@ final class CodexAgentThreadTests: XCTestCase {
         XCTAssertEqual(sandboxPolicy["type"], .string("workspaceWrite"))
         XCTAssertEqual(sandboxPolicy["writableRoots"], .array([.string(workspace.path)]))
         XCTAssertEqual(sandboxPolicy["networkAccess"], .boolean(false))
+        XCTAssertEqual(sandboxPolicy["excludeSlashTmp"], .boolean(true))
+        XCTAssertEqual(sandboxPolicy["excludeTmpdirEnvVar"], .boolean(true))
+
+        await client.stop()
+    }
+
+    func testReadThreadRejectsAThreadFromAnotherWorkspace() async throws {
+        let transport = AgentThreadMockTransport()
+        let client = makeClient(transport: transport)
+        _ = try await client.connect()
+
+        // The mock's thread/read always answers with a thread rooted in the
+        // current directory, so a workspace pointing anywhere else must be
+        // rejected by the client's scoping guard.
+        let otherDirectoryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: otherDirectoryURL,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: otherDirectoryURL) }
+        let otherWorkspace = try CodexAgentWorkspace(directoryURL: otherDirectoryURL)
+
+        do {
+            _ = try await client.readThread(threadID: "thread_123", in: otherWorkspace)
+            XCTFail("Expected readThread to reject a thread outside the workspace")
+        } catch let error as CodexAppServerError {
+            XCTAssertEqual(
+                error,
+                .threadOutsideWorkspace(
+                    threadID: "thread_123",
+                    workspacePath: otherWorkspace.path
+                )
+            )
+        }
 
         await client.stop()
     }

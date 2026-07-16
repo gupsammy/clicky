@@ -66,15 +66,35 @@ extension CodexAppServerClient {
 
     func readThread(
         threadID: String,
+        in workspace: CodexAgentWorkspace,
         includeTurns: Bool = true
     ) async throws -> CodexThreadReadResponse {
-        try await sendRequest(
+        let threadReadResponse: CodexThreadReadResponse = try await sendRequest(
             method: "thread/read",
             parameters: CodexThreadReadParameters(
                 threadId: threadID,
                 includeTurns: includeTurns
             )
         )
+
+        // thread/read has no server-side workspace filter (unlike thread/list),
+        // so enforce the "history is scoped to the selected Agent Folder"
+        // guarantee here instead of trusting every caller to only pass thread
+        // IDs obtained from a scoped listThreads call. Both paths are resolved
+        // because Codex may report the same directory through a different
+        // symlink spelling (e.g. /tmp vs /private/tmp on macOS).
+        let workspaceDirectoryPath = URL(fileURLWithPath: workspace.path)
+            .resolvingSymlinksInPath().path
+        let threadDirectoryPath = URL(fileURLWithPath: threadReadResponse.thread.cwd)
+            .resolvingSymlinksInPath().path
+        guard threadDirectoryPath == workspaceDirectoryPath else {
+            throw CodexAppServerError.threadOutsideWorkspace(
+                threadID: threadID,
+                workspacePath: workspace.path
+            )
+        }
+
+        return threadReadResponse
     }
 
     func startTurn(

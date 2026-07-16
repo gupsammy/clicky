@@ -238,6 +238,7 @@ enum CodexAppServerError: LocalizedError, Equatable, Sendable {
     case requestTimedOut(method: String)
     case protocolFailure(code: Int, message: String)
     case processTerminated(exitCode: Int32, standardError: String)
+    case threadOutsideWorkspace(threadID: String, workspacePath: String)
 
     var errorDescription: String? {
         switch self {
@@ -265,6 +266,8 @@ enum CodexAppServerError: LocalizedError, Equatable, Sendable {
                 return "Codex app-server exited with status \(exitCode)."
             }
             return "Codex app-server exited with status \(exitCode): \(trimmedStandardError)"
+        case .threadOutsideWorkspace(let threadID, let workspacePath):
+            return "Thread \(threadID) does not belong to the selected Agent Folder: \(workspacePath)"
         }
     }
 }
