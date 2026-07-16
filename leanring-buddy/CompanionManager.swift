@@ -607,7 +607,10 @@ final class CompanionManager: ObservableObject {
             }
 
             NotificationCenter.default.post(name: .clickyDismissPanel, object: nil)
+            currentResponseTask?.cancel()
+            currentResponseTask = nil
             elevenLabsTTSClient.stopPlayback()
+            clearDetectedElementLocation()
             ClickyAnalytics.trackFastDictationStarted()
 
             pendingKeyboardShortcutStartTask?.cancel()
