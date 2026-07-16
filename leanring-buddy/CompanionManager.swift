@@ -54,6 +54,7 @@ final class CompanionManager: ObservableObject {
     private var activeSpatialCursorTrace: SpatialCursorTrace?
     private var pendingSpatialCursorTrace: SpatialCursorTrace?
     private var spatialInteractionProgress: SpatialInteractionProgress = .waiting
+    private var spatialInteractionClickTask: Task<Void, Never>?
     private var spatialInteractionHoverTask: Task<Void, Never>?
     private var spatialInteractionHoverPoint: SpatialInteractionPoint?
 
@@ -365,6 +366,8 @@ final class CompanionManager: ObservableObject {
     func clearSpatialInteractionWalkthrough() {
         globalPushToTalkShortcutMonitor
             .setSpatialInteractionObservationEnabled(false)
+        spatialInteractionClickTask?.cancel()
+        spatialInteractionClickTask = nil
         spatialInteractionHoverTask?.cancel()
         spatialInteractionHoverTask = nil
         spatialInteractionHoverPoint = nil
@@ -703,20 +706,40 @@ final class CompanionManager: ObservableObject {
         }
 
         switch spatialInteractionEvent {
-        case .leftMouseDown(let spatialCursorSample):
+        case .leftMouseUp(let spatialCursorSample):
             cancelSpatialInteractionHover()
             guard let screenshotPoint = activeSpatialInteractionPresentation
                 .screenshotGeometry
                 .screenshotPoint(for: spatialCursorSample) else {
                 return
             }
-            applySpatialInteractionEvent(
-                .click(
-                    displayIdentifier: spatialCursorSample.displayIdentifier,
-                    screenshotPoint: screenshotPoint
-                ),
-                presentation: activeSpatialInteractionPresentation
-            )
+            spatialInteractionClickTask?.cancel()
+            spatialInteractionClickTask = Task { [weak self] in
+                // The listen-only event tap observes mouse-up before the
+                // destination app applies it. Let the clicked UI settle before
+                // the walkthrough captures the next screen.
+                do {
+                    try await Task.sleep(for: .milliseconds(150))
+                } catch {
+                    return
+                }
+                guard let self,
+                      !Task.isCancelled,
+                      self.activeSpatialInteractionPresentation
+                        == activeSpatialInteractionPresentation,
+                      self.spatialInteractionProgress == .waiting else {
+                    return
+                }
+                self.spatialInteractionClickTask = nil
+                self.applySpatialInteractionEvent(
+                    .click(
+                        displayIdentifier:
+                            spatialCursorSample.displayIdentifier,
+                        screenshotPoint: screenshotPoint
+                    ),
+                    presentation: activeSpatialInteractionPresentation
+                )
+            }
         case .pointerMoved(let spatialCursorSample):
             guard case let .hover(minimumDuration) =
                     activeSpatialInteractionPresentation.step.kind else {

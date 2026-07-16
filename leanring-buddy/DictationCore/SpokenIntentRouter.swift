@@ -335,14 +335,14 @@ public enum SpokenIntentRouter {
             offsetBy: "agent".count
         )
         guard boundaryStartIndex < transcript.endIndex else { return "" }
-        guard isTriggerBoundary(transcript[boundaryStartIndex]) else {
+        guard isPromptSeparator(transcript[boundaryStartIndex]) else {
             return nil
         }
 
         var promptStartIndex = boundaryStartIndex
         var boundaryContainsPunctuation = false
         while promptStartIndex < transcript.endIndex,
-              isTriggerBoundary(transcript[promptStartIndex]) {
+              isPromptSeparator(transcript[promptStartIndex]) {
             if String(transcript[promptStartIndex]).rangeOfCharacter(
                 from: .punctuationCharacters
             ) != nil {

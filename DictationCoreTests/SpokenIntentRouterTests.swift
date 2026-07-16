@@ -67,6 +67,14 @@ final class SpokenIntentRouterTests: XCTestCase {
             SpokenIntentRouter.route("Hey Clicky, agent-based reasoning is neat"),
             .companion
         )
+        XCTAssertEqual(
+            SpokenIntentRouter.route("Agent's not working"),
+            .companion
+        )
+        XCTAssertEqual(
+            SpokenIntentRouter.route("Agent-based reasoning is neat"),
+            .companion
+        )
     }
 
     func testPhraseSeparatorAfterTriggerWordStillRoutesToAgent() {

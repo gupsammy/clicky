@@ -14,7 +14,7 @@ import Foundation
 
 enum SpatialInteractionObservedPointerEvent {
     case pointerMoved(SpatialCursorSample)
-    case leftMouseDown(SpatialCursorSample)
+    case leftMouseUp(SpatialCursorSample)
 }
 
 final class GlobalPushToTalkShortcutMonitor: ObservableObject {
@@ -53,7 +53,7 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
             .keyDown,
             .keyUp,
             .mouseMoved,
-            .leftMouseDown,
+            .leftMouseUp,
             .leftMouseDragged,
             .rightMouseDragged,
             .otherMouseDragged
@@ -171,7 +171,7 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
             return Unmanaged.passUnretained(event)
         }
 
-        if eventType == .leftMouseDown {
+        if eventType == .leftMouseUp {
             guard isSpatialInteractionObservationEnabled,
                   let spatialCursorSample = spatialCursorSample(
                       from: event,
@@ -180,7 +180,7 @@ final class GlobalPushToTalkShortcutMonitor: ObservableObject {
                 return Unmanaged.passUnretained(event)
             }
             spatialInteractionEventPublisher.send(
-                .leftMouseDown(spatialCursorSample)
+                .leftMouseUp(spatialCursorSample)
             )
             return Unmanaged.passUnretained(event)
         }
