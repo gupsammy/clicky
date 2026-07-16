@@ -55,7 +55,7 @@ final class AgentHUDWindowManager {
             queue: .main
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.rebuildAllWindows()
+                self?.rehomePanelsThatAreNotOnActiveSpace()
             }
         }
     }
@@ -99,6 +99,18 @@ final class AgentHUDWindowManager {
     private func rebuildAllWindows() {
         hide()
         show()
+    }
+
+    private func rehomePanelsThatAreNotOnActiveSpace() {
+        let allPanels = [notchPanel].compactMap { $0 }
+            + Array(tokenPanelsByDisplayIdentifier.values)
+        let stalePanels = allPanels.filter { !$0.isOnActiveSpace }
+        guard !stalePanels.isEmpty else { return }
+
+        for stalePanel in stalePanels {
+            stalePanel.orderOut(nil)
+        }
+        refreshWindowLayout()
     }
 
     private func createNotchPanelIfNeeded() {
