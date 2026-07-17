@@ -238,6 +238,112 @@ final class CodexAgentTaskStoreTests: XCTestCase {
         XCTAssertEqual(snapshot.status, .running)
     }
 
+    func testAgentMessageDeltasCoalescePresentationSnapshots() async throws {
+        let store = CodexAgentTaskStore()
+        let recorder = AgentSnapshotPublicationRecorder()
+        let recordingTask = Task {
+            for await snapshots in store.snapshots {
+                guard !Task.isCancelled else { return }
+                await recorder.record(snapshots)
+            }
+        }
+        defer { recordingTask.cancel() }
+
+        let thread = makeThread(
+            id: "thread_coalesced_message",
+            preview: "Coalesced message"
+        )
+        await store.register(thread: thread)
+        for _ in 0..<100 where await recorder.publicationCount() == 0 {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        let initialPublicationCount = await recorder.publicationCount()
+        XCTAssertEqual(initialPublicationCount, 1)
+
+        await store.apply(
+            notification: try notification(
+                method: "turn/started",
+                parameters: CodexTurnLifecycleNotification(
+                    threadId: thread.id,
+                    turn: makeTurn(
+                        id: "turn_coalesced_message",
+                        status: .inProgress
+                    )
+                )
+            )
+        )
+        for _ in 0..<100 where await recorder.publicationCount() < 2 {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        let runningPublicationCount = await recorder.publicationCount()
+        XCTAssertEqual(runningPublicationCount, 2)
+
+        for deltaIndex in 0..<20 {
+            await store.apply(
+                notification: try notification(
+                    method: "item/agentMessage/delta",
+                    parameters: CodexAgentMessageDeltaNotification(
+                        threadId: thread.id,
+                        turnId: "turn_coalesced_message",
+                        itemId: "message_coalesced",
+                        delta: "\(deltaIndex),"
+                    )
+                )
+            )
+        }
+
+        try await Task.sleep(for: .milliseconds(10))
+        let earlyPublicationCount = await recorder.publicationCount()
+        XCTAssertEqual(earlyPublicationCount, 2)
+
+        try await Task.sleep(for: .milliseconds(70))
+        let coalescedPublicationCount = await recorder.publicationCount()
+        XCTAssertEqual(coalescedPublicationCount, 3)
+        let latestSnapshots = await recorder.latestSnapshots()
+        let latestSnapshot = try XCTUnwrap(latestSnapshots.first)
+        XCTAssertEqual(
+            latestSnapshot.latestAgentMessage,
+            (0..<20).map { "\($0)," }.joined()
+        )
+
+        await store.apply(
+            notification: try notification(
+                method: "item/agentMessage/delta",
+                parameters: CodexAgentMessageDeltaNotification(
+                    threadId: thread.id,
+                    turnId: "turn_coalesced_message",
+                    itemId: "message_coalesced",
+                    delta: "urgent"
+                )
+            )
+        )
+        await store.apply(
+            serverRequest: CodexAppServerRequest(
+                id: .integer(77),
+                method: "item/tool/requestUserInput",
+                params: userInputParameters(
+                    threadID: thread.id,
+                    turnID: "turn_coalesced_message",
+                    itemID: "input_coalesced",
+                    autoResolutionMs: nil
+                )
+            )
+        )
+
+        try await Task.sleep(for: .milliseconds(10))
+        let immediateRequestPublicationCount = await recorder.publicationCount()
+        XCTAssertEqual(immediateRequestPublicationCount, 4)
+        let requestSnapshots = await recorder.latestSnapshots()
+        let requestSnapshot = try XCTUnwrap(requestSnapshots.first)
+        XCTAssertEqual(requestSnapshot.status, .waitingForInput)
+        XCTAssertEqual(requestSnapshot.pendingUserInputs.map(\.requestID), [.integer(77)])
+        XCTAssertTrue(requestSnapshot.latestAgentMessage.hasSuffix("urgent"))
+
+        try await Task.sleep(for: .milliseconds(70))
+        let finalPublicationCount = await recorder.publicationCount()
+        XCTAssertEqual(finalPublicationCount, 4)
+    }
+
     func testCompactionOnlyLatestTurnHydratesThePreviousAgentAnswer() async throws {
         let store = CodexAgentTaskStore()
         let answeredTurn = CodexTurn(
@@ -1520,5 +1626,21 @@ final class CodexAgentTaskStoreTests: XCTestCase {
                 CodexJSONValue.integer(Int64($0))
             } ?? .null
         ])
+    }
+}
+
+private actor AgentSnapshotPublicationRecorder {
+    private var recordedSnapshots: [[CodexAgentTaskSnapshot]] = []
+
+    func record(_ snapshots: [CodexAgentTaskSnapshot]) {
+        recordedSnapshots.append(snapshots)
+    }
+
+    func publicationCount() -> Int {
+        recordedSnapshots.count
+    }
+
+    func latestSnapshots() -> [CodexAgentTaskSnapshot] {
+        recordedSnapshots.last ?? []
     }
 }

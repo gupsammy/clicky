@@ -11,6 +11,7 @@ actor CodexAgentTaskStore {
     nonisolated let snapshots: AsyncStream<[CodexAgentTaskSnapshot]>
 
     private static let maximumActivitiesPerTask = 100
+    private static let agentMessageSnapshotPublicationDelay = Duration.milliseconds(50)
     private static let approvalRequestMethods: Set<String> = [
         "item/commandExecution/requestApproval",
         "item/fileChange/requestApproval",
@@ -64,6 +65,7 @@ actor CodexAgentTaskStore {
     private var nextEventSequence: Int64 = 1
     private var notificationMonitoringTask: Task<Void, Never>?
     private var serverRequestMonitoringTask: Task<Void, Never>?
+    private var pendingAgentMessageSnapshotPublicationTask: Task<Void, Never>?
     private var automaticUserInputResolutionTasks: [
         CodexAppServerRequestID: Task<Void, Never>
     ] = [:]
@@ -91,6 +93,7 @@ actor CodexAgentTaskStore {
     deinit {
         notificationMonitoringTask?.cancel()
         serverRequestMonitoringTask?.cancel()
+        pendingAgentMessageSnapshotPublicationTask?.cancel()
         for automaticResolutionTask in automaticUserInputResolutionTasks.values {
             automaticResolutionTask.cancel()
         }
@@ -126,6 +129,8 @@ actor CodexAgentTaskStore {
         serverRequestMonitoringTask?.cancel()
         notificationMonitoringTask = nil
         serverRequestMonitoringTask = nil
+        pendingAgentMessageSnapshotPublicationTask?.cancel()
+        pendingAgentMessageSnapshotPublicationTask = nil
         cancelAllAutomaticUserInputResolutions()
     }
 
@@ -708,7 +713,7 @@ actor CodexAgentTaskStore {
         }
         taskState.lastEventSequence = takeNextEventSequence()
         taskStatesByThreadID[parameters.threadId] = taskState
-        publishSnapshots()
+        scheduleAgentMessageSnapshotPublication()
     }
 
     private func applyItemStarted(_ notification: CodexAppServerNotification) {
@@ -1162,6 +1167,25 @@ actor CodexAgentTaskStore {
     }
 
     private func publishSnapshots() {
+        pendingAgentMessageSnapshotPublicationTask?.cancel()
+        pendingAgentMessageSnapshotPublicationTask = nil
+        snapshotContinuation.yield(sortedSnapshots())
+    }
+
+    private func scheduleAgentMessageSnapshotPublication() {
+        guard pendingAgentMessageSnapshotPublicationTask == nil else { return }
+
+        pendingAgentMessageSnapshotPublicationTask = Task { [weak self] in
+            try? await Task.sleep(
+                for: Self.agentMessageSnapshotPublicationDelay
+            )
+            guard !Task.isCancelled else { return }
+            await self?.publishScheduledAgentMessageSnapshots()
+        }
+    }
+
+    private func publishScheduledAgentMessageSnapshots() {
+        pendingAgentMessageSnapshotPublicationTask = nil
         snapshotContinuation.yield(sortedSnapshots())
     }
 
