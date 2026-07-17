@@ -369,6 +369,57 @@ final class CodexCompanionServiceTests: XCTestCase {
         await service.stop()
     }
 
+    func testMidTurnProcessFailureFailsWaiterAndReconnectsOnNextResponse() async throws {
+        let transport = CodexCompanionMockTransport(
+            turnResults: [
+                .inProgress,
+                .completed("recovered response")
+            ]
+        )
+        let service = makeService(
+            transport: transport,
+            responseTimeoutNanoseconds: 2_000_000_000
+        )
+        let expectedFailure = CodexAppServerError.processTerminated(
+            exitCode: -9,
+            standardError: "Simulated mid-turn process failure"
+        )
+
+        let inProgressResponse = Task {
+            try await service.respond(
+                mode: .companion,
+                prompt: "wait for the process failure"
+            )
+        }
+        for _ in 0..<100 where transport.requestCount(for: "turn/start") == 0 {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        XCTAssertEqual(transport.requestCount(for: "turn/start"), 1)
+
+        transport.emitTermination(expectedFailure)
+
+        do {
+            _ = try await inProgressResponse.value
+            XCTFail("Expected the active response to fail with the process")
+        } catch let error as CodexAppServerError {
+            XCTAssertEqual(error, expectedFailure)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        let recoveredResponse = try await service.respond(
+            mode: .companion,
+            prompt: "retry after process failure"
+        )
+        XCTAssertEqual(recoveredResponse, "recovered response")
+        XCTAssertEqual(transport.startCallCount, 2)
+        XCTAssertEqual(transport.requestCount(for: "model/list"), 2)
+        XCTAssertEqual(transport.requestCount(for: "thread/start"), 2)
+        XCTAssertEqual(transport.requestCount(for: "turn/start"), 2)
+
+        await service.stop()
+    }
+
     private func makeService(
         transport: CodexCompanionMockTransport,
         responseTimeoutNanoseconds: UInt64 = 1_000_000_000
@@ -448,6 +499,7 @@ private enum CodexCompanionMockTurnResult {
 private final class CodexCompanionMockTransport: CodexAppServerTransport, @unchecked Sendable {
     private let stateLock = NSLock()
     private var messageHandler: (@Sendable (Data) -> Void)?
+    private var terminationHandler: (@Sendable (CodexAppServerError) -> Void)?
     private var parametersByMethod: [String: [CodexJSONValue]] = [:]
     private var turnResults: [CodexCompanionMockTurnResult]
     private var latestTurnResult: CodexCompanionMockTurnResult = .inProgress
@@ -481,6 +533,7 @@ private final class CodexCompanionMockTransport: CodexAppServerTransport, @unche
         stateLock.lock()
         capturedStartCallCount += 1
         messageHandler = onMessage
+        terminationHandler = onTermination
         stateLock.unlock()
     }
 
@@ -548,6 +601,7 @@ private final class CodexCompanionMockTransport: CodexAppServerTransport, @unche
         stateLock.lock()
         capturedStopCallCount += 1
         messageHandler = nil
+        terminationHandler = nil
         stateLock.unlock()
     }
 
@@ -608,6 +662,13 @@ private final class CodexCompanionMockTransport: CodexAppServerTransport, @unche
         let currentMessageHandler = messageHandler
         stateLock.unlock()
         currentMessageHandler?(requestData)
+    }
+
+    func emitTermination(_ error: CodexAppServerError) {
+        stateLock.lock()
+        let currentTerminationHandler = terminationHandler
+        stateLock.unlock()
+        currentTerminationHandler?(error)
     }
 
     private func makeResponse(

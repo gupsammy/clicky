@@ -73,6 +73,7 @@ actor CodexCompanionService {
     private var responseTimeoutTasksByTurn: [TurnKey: Task<Void, Never>] = [:]
     private var notificationDrainTask: Task<Void, Never>?
     private var serverRequestDrainTask: Task<Void, Never>?
+    private var failureDrainTask: Task<Void, Never>?
 
     init(
         client: CodexAppServerClient,
@@ -189,8 +190,10 @@ actor CodexCompanionService {
         failAllPendingResponseWaiters(with: CancellationError())
         notificationDrainTask?.cancel()
         serverRequestDrainTask?.cancel()
+        failureDrainTask?.cancel()
         notificationDrainTask = nil
         serverRequestDrainTask = nil
+        failureDrainTask = nil
         selectedModel = nil
         connectionTask?.cancel()
         connectionTask = nil
@@ -287,6 +290,23 @@ actor CodexCompanionService {
                 }
             }
         }
+
+        if failureDrainTask == nil {
+            failureDrainTask = Task { [weak self, failures = client.failures] in
+                for await failure in failures {
+                    guard !Task.isCancelled else { return }
+                    await self?.handleClientFailure(failure)
+                }
+            }
+        }
+    }
+
+    private func handleClientFailure(_ failure: CodexAppServerError) {
+        failAllPendingResponseWaiters(with: failure)
+        selectedModel = nil
+        connectionTask?.cancel()
+        connectionTask = nil
+        threadIDsByMode.removeAll()
     }
 
     private func threadID(
