@@ -296,7 +296,9 @@ final class CodexAgentTaskStoreTests: XCTestCase {
         let earlyPublicationCount = await recorder.publicationCount()
         XCTAssertEqual(earlyPublicationCount, 2)
 
-        try await Task.sleep(for: .milliseconds(70))
+        for _ in 0..<1_000 where await recorder.publicationCount() < 3 {
+            try await Task.sleep(for: .milliseconds(1))
+        }
         let coalescedPublicationCount = await recorder.publicationCount()
         XCTAssertEqual(coalescedPublicationCount, 3)
         let latestSnapshots = await recorder.latestSnapshots()
@@ -330,7 +332,9 @@ final class CodexAgentTaskStoreTests: XCTestCase {
             )
         )
 
-        try await Task.sleep(for: .milliseconds(10))
+        for _ in 0..<1_000 where await recorder.publicationCount() < 4 {
+            try await Task.sleep(for: .milliseconds(1))
+        }
         let immediateRequestPublicationCount = await recorder.publicationCount()
         XCTAssertEqual(immediateRequestPublicationCount, 4)
         let requestSnapshots = await recorder.latestSnapshots()
