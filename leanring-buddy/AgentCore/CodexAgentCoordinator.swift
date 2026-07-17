@@ -183,6 +183,7 @@ actor CodexAgentCoordinator {
         if !currentTask.status.isTerminal, let turnID = currentTask.turnID {
             guard !currentTask.activities.contains(where: { activity in
                 activity.kind == .contextCompaction
+                    && activity.status == .running
             }) else {
                 throw CodexAppServerError.threadBusyCompacting
             }
