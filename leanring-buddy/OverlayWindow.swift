@@ -485,7 +485,9 @@ struct BlueCursorView: View {
     // MARK: - Cursor Tracking
 
     private func startTrackingCursor() {
-        timer = Timer.scheduledTimer(withTimeInterval: 0.016, repeats: true) { _ in
+        // Spring interpolation keeps the buddy visually smooth without waking
+        // every display overlay at 60 Hz while the physical cursor is idle.
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30.0, repeats: true) { _ in
             let mouseLocation = NSEvent.mouseLocation
             let cursorIsOnThisScreen = self.screenFrame.contains(mouseLocation)
             if self.isCursorOnThisScreen != cursorIsOnThisScreen {
