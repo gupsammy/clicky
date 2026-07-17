@@ -815,6 +815,63 @@ final class CodexAppServerCoreTests: XCTestCase {
         XCTAssertTrue(transport.sentMethods.isEmpty)
     }
 
+    func testCoordinatorAllowsSteeringAfterContextCompactionCompletes() async throws {
+        let transport = MockCodexAppServerTransport()
+        let coordinator = CodexAgentCoordinator(
+            client: makeClient(transport: transport)
+        )
+        _ = try await coordinator.start()
+        defer { Task { await coordinator.stop() } }
+
+        let task = CodexAgentTaskSnapshot(
+            threadID: "thread_compacted",
+            turnID: "turn_compacted",
+            workspacePath: "/tmp",
+            title: "Compacted",
+            status: .running,
+            latestAgentMessage: "",
+            currentActivity: CodexAgentActivity(
+                itemID: "command_item",
+                kind: .command,
+                summary: "Running tests",
+                status: .running
+            ),
+            activities: [
+                CodexAgentActivity(
+                    itemID: "compaction_item",
+                    kind: .contextCompaction,
+                    summary: "Compacting context",
+                    status: .completed
+                ),
+                CodexAgentActivity(
+                    itemID: "command_item",
+                    kind: .command,
+                    summary: "Running tests",
+                    status: .running
+                )
+            ],
+            pendingApprovals: [],
+            pendingUserInputs: [],
+            errorMessage: nil,
+            lastEventSequence: 2
+        )
+        let workspace = try CodexAgentWorkspace(
+            directoryURL: URL(fileURLWithPath: "/tmp")
+        )
+
+        try await coordinator.followUp(
+            prompt: "Continue with the regression test",
+            on: task,
+            in: workspace
+        )
+
+        XCTAssertEqual(transport.sentMethods.last, "turn/steer")
+        XCTAssertEqual(
+            transport.sentRequestParameters["turn/steer"]?.objectValue?["expectedTurnId"],
+            .string("turn_compacted")
+        )
+    }
+
     func testCoordinatorRefreshesCompletedTaskBeforeChoosingFollowUpOperation() async throws {
         let transport = MockCodexAppServerTransport()
         let store = CodexAgentTaskStore()
@@ -1217,6 +1274,12 @@ private final class MockCodexAppServerTransport: CodexAppServerTransport, @unche
                         error: nil
                     )
                 )
+            )
+            currentMessageHandler?(try JSONEncoder().encode(response))
+        case "turn/steer":
+            let response = CodexAppServerOutgoingResponse(
+                id: requestID,
+                result: CodexTurnSteerResponse(turnId: "turn_compacted")
             )
             currentMessageHandler?(try JSONEncoder().encode(response))
         default:
