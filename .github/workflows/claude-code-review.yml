@@ -137,7 +137,8 @@ jobs:
               the run fails. Do NOT try to post the review yourself.
             - pull_request-triggered run: post it as a top-level PR comment as usual.
           claude_args: |
-            --model sonnet
+            --model opus
+            --effort high
             --allowedTools "Read,Write,Glob,Grep,Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr comment:*),mcp__github_inline_comment__create_inline_comment"
 
       # Surfaces what Claude actually did (tool calls, denials, errors) — the
